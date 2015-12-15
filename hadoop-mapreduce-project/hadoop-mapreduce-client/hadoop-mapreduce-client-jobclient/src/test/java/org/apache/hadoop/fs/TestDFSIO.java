@@ -29,6 +29,8 @@ import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.io.PrintStream;
 import java.util.Date;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Random;
 import java.util.StringTokenizer;
 import org.apache.commons.logging.Log;
@@ -168,6 +170,61 @@ public class TestDFSIO implements Tool {
         return TB;
       throw new IllegalArgumentException("Unsupported ByteMultiple "+sMultiple);
     }
+  }
+  
+  static class ThreadSampler implements Runnable {
+	  
+	  private Thread samplerThread;
+	  private final Thread thread;
+	  private final long interval;
+	  private final HashMap<String, Long> methodCounts;
+	  
+	  public ThreadSampler(Thread thread, long interval) {
+		  this.thread = thread;
+		  this.interval = interval;
+		  methodCounts = new HashMap<String, Long>();
+	  }
+	  
+	  public void start() {
+		  if (samplerThread == null) {
+			  samplerThread = new Thread(this, "Sampler Thread");
+			  samplerThread.start();
+		  }
+	  }
+	  
+	  public void stop() {
+		  if (samplerThread != null) {
+			  samplerThread.stop();
+			  samplerThread = null;
+		  }
+	  }
+	  
+	  @Override
+	  public void run() {
+		  while (true) {
+			  try {
+				  Thread.sleep(interval);
+			  } catch (InterruptedException e) {
+				  Thread.currentThread().interrupt();
+			  }
+			  
+			  StackTraceElement stack = thread.getStackTrace()[0];
+			  String currentMethodName = stack.getClassName() + "." + stack.getMethodName();
+			  Long currentMethodCount = methodCounts.get(currentMethodName);
+			  if (currentMethodCount == null) {
+				  methodCounts.put(currentMethodName, 1L);
+			  } else {
+				  methodCounts.put(currentMethodName, currentMethodCount + 1L);
+			  }
+		  }
+	  }
+	  
+	  public void printMetrics() {
+		  for (Map.Entry<String, Long> methodCount : methodCounts.entrySet()) {
+			  LOG.info(methodCount.getKey() + " : " + methodCount.getValue());
+		  }
+	  }
+	  
   }
 
   public TestDFSIO() {
@@ -526,6 +583,9 @@ public class TestDFSIO implements Tool {
                        String name, 
                        long totalSize // in bytes
                      ) throws IOException {
+      ThreadSampler sampler = new ThreadSampler(Thread.currentThread(), 10);
+      sampler.start();
+      
       InputStream in = (InputStream)this.stream;
       long actualSize = 0;
       while (actualSize < totalSize) {
@@ -536,6 +596,11 @@ public class TestDFSIO implements Tool {
                            actualSize + "/" + totalSize 
                            + " ::host = " + hostName);
       }
+      
+      sampler.stop();
+      LOG.info("ReadMapper Metrics");
+      sampler.printMetrics();
+      
       return Long.valueOf(actualSize);
     }
   }
