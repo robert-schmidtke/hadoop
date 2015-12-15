@@ -174,49 +174,54 @@ public class TestDFSIO implements Tool {
   
   static class ThreadSampler implements Runnable {
 	  
+	  private static enum InternalState {
+		  READY, RUNNING, STOPPING, DONE;
+	  }
+	  
 	  private Thread samplerThread;
 	  private final Thread thread;
 	  private final long interval;
 	  private final HashMap<String, Long> methodCounts;
+	  private InternalState state;
 	  
 	  public ThreadSampler(Thread thread, long interval) {
 		  this.thread = thread;
 		  this.interval = interval;
 		  methodCounts = new HashMap<String, Long>();
+		  state = InternalState.READY;
 	  }
 	  
 	  public void start() {
-		  if (samplerThread == null) {
-			  samplerThread = new Thread(this, "Sampler Thread");
-			  samplerThread.start();
-		  }
+		  state = InternalState.RUNNING;
+		  samplerThread = new Thread(this, "Sampler Thread");
+		  samplerThread.start();
 	  }
 	  
 	  public void stop() {
-		  if (samplerThread != null) {
-			  samplerThread.stop();
-			  samplerThread = null;
-		  }
+		  state = InternalState.STOPPING;
+		  while (!state.equals(InternalState.DONE))
+			  ;
 	  }
 	  
 	  @Override
 	  public void run() {
-		  while (true) {
+		  while (state.equals(InternalState.RUNNING)) {
 			  try {
 				  Thread.sleep(interval);
+				  
+				  StackTraceElement stack = thread.getStackTrace()[0];
+				  String currentMethodName = stack.getClassName() + "." + stack.getMethodName();
+				  Long currentMethodCount = methodCounts.get(currentMethodName);
+				  if (currentMethodCount == null) {
+					  methodCounts.put(currentMethodName, 1L);
+				  } else {
+					  methodCounts.put(currentMethodName, currentMethodCount + 1L);
+				  }
 			  } catch (InterruptedException e) {
-				  Thread.currentThread().interrupt();
-			  }
-			  
-			  StackTraceElement stack = thread.getStackTrace()[0];
-			  String currentMethodName = stack.getClassName() + "." + stack.getMethodName();
-			  Long currentMethodCount = methodCounts.get(currentMethodName);
-			  if (currentMethodCount == null) {
-				  methodCounts.put(currentMethodName, 1L);
-			  } else {
-				  methodCounts.put(currentMethodName, currentMethodCount + 1L);
+				  state = InternalState.STOPPING;
 			  }
 		  }
+		  state = InternalState.DONE;
 	  }
 	  
 	  public void printMetrics() {
