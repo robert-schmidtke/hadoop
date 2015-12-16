@@ -176,67 +176,73 @@ public class TestDFSIO implements Tool {
     }
   }
   
-  static class ThreadSampler implements Runnable {
+  static class ThreadSampler {
 	  
-	  private static enum InternalState {
-		  READY, RUNNING, STOPPING, DONE, ERROR;
+	  static class SamplerRunnable implements Runnable {
+		  
+		  public boolean stop;
+		  private final Thread thread;
+		  public final HashMap<String, Long> methodCounts;
+		  
+		  public SamplerRunnable(Thread thread) {
+			  stop = false;
+			  this.thread = thread;
+			  methodCounts = new HashMap<String, Long>();
+		  }
+
+		  @Override
+		  public void run() {
+			  LOG.info("Sampler Runnable started.");
+			  while (!stop) {
+				  try {
+					  Thread.sleep(10);
+					  
+					  StackTraceElement stack = thread.getStackTrace()[0];
+					  String currentMethodName = stack.getClassName() + "." + stack.getMethodName();
+					  Long currentMethodCount = methodCounts.get(currentMethodName);
+					  if (currentMethodCount == null) {
+						  methodCounts.put(currentMethodName, 1L);
+					  } else {
+						  methodCounts.put(currentMethodName, currentMethodCount + 1L);
+					  }
+				  } catch (Exception e) {
+					  LOG.error(e.getMessage(), e);
+					  break;
+				  }
+			  }
+			  LOG.info("Sampler Runnable done.")
+		  }
+		  
 	  }
 	  
-	  private Thread samplerThread;
-	  private final Thread thread;
-	  private final long interval;
-	  private final HashMap<String, Long> methodCounts;
-	  private InternalState state;
+	  private final SamplerRunnable samplerRunnable;
+	  private final Thread samplerThread;
 	  
-	  public ThreadSampler(Thread thread, long interval) {
-		  this.thread = thread;
-		  this.interval = interval;
-		  methodCounts = new HashMap<String, Long>();
-		  state = InternalState.READY;
+	  public ThreadSampler(Thread thread) {
+		  samplerRunnable = new SamplerRunnable(thread);
+		  samplerThread = new Thread(sampleRunnable, "Sampler Thread");
 	  }
 	  
 	  public void start() {
-		  state = InternalState.RUNNING;
-		  samplerThread = new Thread(this, "Sampler Thread");
+		  LOG.info("Starting Sampler Thread.");
 		  samplerThread.start();
+		  LOG.info("Started Sampler Thread.");
 	  }
 	  
 	  public void stop() {
-		  if (state.equals(InternalState.RUNNING)) {
-			  state = InternalState.STOPPING;
-			  while (state.equals(InternalState.STOPPING))
-				  ;
+		  LOG.info("Stopping Sampler Thread.");
+		  samplerRunnable.stop = true;
+		  try {
+			  samplerThread.join();
+		  } catch (Exception e) {
+			  LOG.error(e.getMessage(), e);
 		  }
-		  LOG.info("Sampler Thread exited with state " + state.name());
-	  }
-	  
-	  @Override
-	  public void run() {
-		  while (state.equals(InternalState.RUNNING)) {
-			  try {
-				  Thread.sleep(interval);
-				  
-				  StackTraceElement stack = thread.getStackTrace()[0];
-				  String currentMethodName = stack.getClassName() + "." + stack.getMethodName();
-				  Long currentMethodCount = methodCounts.get(currentMethodName);
-				  if (currentMethodCount == null) {
-					  methodCounts.put(currentMethodName, 1L);
-				  } else {
-					  methodCounts.put(currentMethodName, currentMethodCount + 1L);
-				  }
-			  } catch (Exception e) {
-				  LOG.error(e.getMessage(), e);
-				  state = InternalState.ERROR;
-			  }
-		  }
-		  if (!state.equals(InternalState.ERROR)) {
-			  state = InternalState.DONE;
-		  }
+		  LOG.info("Stopped Sampler Thread.");
 	  }
 	  
 	  public void printMetrics() {
 		  List<Map.Entry<String, Long>> sortedMethodCounts =
-				  new ArrayList<Map.Entry<String, Long>>(methodCounts.entrySet());
+				  new ArrayList<Map.Entry<String, Long>>(samplerRunnable.methodCounts.entrySet());
 		  Collections.sort(sortedMethodCounts, new Comparator<Map.Entry<String, Long>>() {
 			  @Override
 			  public int compare(Map.Entry<String, Long> a, Map.Entry<String, Long> b) {
@@ -612,7 +618,7 @@ public class TestDFSIO implements Tool {
                        String name, 
                        long totalSize // in bytes
                      ) throws IOException {
-      ThreadSampler sampler = new ThreadSampler(Thread.currentThread(), 10);
+      ThreadSampler sampler = new ThreadSampler(Thread.currentThread());
       sampler.start();
       
       InputStream in = (InputStream)this.stream;
