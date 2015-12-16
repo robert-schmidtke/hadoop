@@ -175,7 +175,7 @@ public class TestDFSIO implements Tool {
   static class ThreadSampler implements Runnable {
 	  
 	  private static enum InternalState {
-		  READY, RUNNING, STOPPING, DONE;
+		  READY, RUNNING, STOPPING, DONE, ERROR;
 	  }
 	  
 	  private Thread samplerThread;
@@ -198,9 +198,12 @@ public class TestDFSIO implements Tool {
 	  }
 	  
 	  public void stop() {
-		  state = InternalState.STOPPING;
-		  while (!state.equals(InternalState.DONE))
-			  ;
+		  if (state.equals(InternalState.RUNNING)) {
+			  state = InternalState.STOPPING;
+			  while (state.equals(InternalState.STOPPING))
+				  ;
+		  }
+		  LOG.info("Sampler Thread exited with state " + state.name());
 	  }
 	  
 	  @Override
@@ -217,11 +220,14 @@ public class TestDFSIO implements Tool {
 				  } else {
 					  methodCounts.put(currentMethodName, currentMethodCount + 1L);
 				  }
-			  } catch (InterruptedException e) {
-				  state = InternalState.STOPPING;
+			  } catch (Exception e) {
+				  LOG.error(e.getMessage(), e);
+				  state = InternalState.ERROR;
 			  }
 		  }
-		  state = InternalState.DONE;
+		  if (!state.equals(InternalState.ERROR)) {
+			  state = InternalState.DONE;
+		  }
 	  }
 	  
 	  public void printMetrics() {
