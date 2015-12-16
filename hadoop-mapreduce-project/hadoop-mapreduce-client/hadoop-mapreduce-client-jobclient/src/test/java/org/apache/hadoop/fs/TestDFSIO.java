@@ -210,7 +210,7 @@ public class TestDFSIO implements Tool {
 					  break;
 				  }
 			  }
-			  LOG.info("Sampler Runnable done.")
+			  LOG.info("Sampler Runnable done.");
 		  }
 		  
 	  }
@@ -220,7 +220,7 @@ public class TestDFSIO implements Tool {
 	  
 	  public ThreadSampler(Thread thread) {
 		  samplerRunnable = new SamplerRunnable(thread);
-		  samplerThread = new Thread(sampleRunnable, "Sampler Thread");
+		  samplerThread = new Thread(samplerRunnable, "Sampler Thread");
 	  }
 	  
 	  public void start() {
