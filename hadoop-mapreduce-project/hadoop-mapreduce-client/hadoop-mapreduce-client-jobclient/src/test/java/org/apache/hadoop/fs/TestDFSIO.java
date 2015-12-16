@@ -28,8 +28,12 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.io.PrintStream;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import java.util.StringTokenizer;
@@ -231,7 +235,21 @@ public class TestDFSIO implements Tool {
 	  }
 	  
 	  public void printMetrics() {
-		  for (Map.Entry<String, Long> methodCount : methodCounts.entrySet()) {
+		  List<Map.Entry<String, Long>> sortedMethodCounts =
+				  new ArrayList<Map.Entry<String, Long>>(methodCounts.entrySet());
+		  Collections.sort(sortedMethodCounts, new Comparator<Map.Entry<String, Long>>() {
+			  @Override
+			  public int compare(Map.Entry<String, Long> a, Map.Entry<String, Long> b) {
+				  int cmp = a.getValue().compareTo(b.getValue());
+				  if (cmp != 0) {
+					  return cmp;
+				  } else {
+					  return a.getKey().compareTo(b.getKey());
+				  }
+			  }
+		  });
+		  
+		  for (Map.Entry<String, Long> methodCount : sortedMethodCounts) {
 			  LOG.info(methodCount.getKey() + " : " + methodCount.getValue());
 		  }
 	  }
