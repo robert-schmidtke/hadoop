@@ -197,11 +197,16 @@ public class TestDFSIO implements Tool {
 				  try {
 					  Thread.sleep(10);
 					  
-					  StackTraceElement stack = thread.getStackTrace()[0];
-					  String currentMethodName = stack.getClassName() + "." + stack.getMethodName();
+					  StackTraceElement[] stack = thread.getStackTrace();
+					  String currentMethodName = stack[0].getClassName() + "." + stack[0].getMethodName();
 					  Long currentMethodCount = methodCounts.get(currentMethodName);
 					  if (currentMethodCount == null) {
 						  methodCounts.put(currentMethodName, 1L);
+						  LOG.info(currentMethodName + " StackTrace:");
+						  for (StackTraceElement ste : stack) {
+							  LOG.info(ste.getClassName() + "." + ste.getMethodName()
+									  + ":" + ste.getLineNumber());
+						  }
 					  } else {
 						  methodCounts.put(currentMethodName, currentMethodCount + 1L);
 					  }
