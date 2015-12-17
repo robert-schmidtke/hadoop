@@ -880,7 +880,7 @@ public class TestDFSIO implements Tool {
         resFileName = args[++i];
       } else if (args[i].equals("-mrAmLogLevel")) {
         mrAmLogLevel = args[++i];
-      } else
+      } else {
         System.err.println("Illegal argument: " + args[i]);
         return -1;
       }
