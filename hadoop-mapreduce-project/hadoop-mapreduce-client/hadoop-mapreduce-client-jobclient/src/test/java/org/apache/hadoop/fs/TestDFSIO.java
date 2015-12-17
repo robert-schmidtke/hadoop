@@ -55,6 +55,7 @@ import org.apache.hadoop.mapred.Mapper;
 import org.apache.hadoop.mapred.OutputCollector;
 import org.apache.hadoop.mapred.Reporter;
 import org.apache.hadoop.mapred.SequenceFileInputFormat;
+import org.apache.hadoop.mapreduce.MRJobConfig;
 import org.apache.hadoop.util.ReflectionUtils;
 import org.apache.hadoop.util.StringUtils;
 import org.apache.hadoop.util.Tool;
@@ -834,6 +835,7 @@ public class TestDFSIO implements Tool {
     String resFileName = DEFAULT_RES_FILE_NAME;
     String compressionClass = null;
     boolean isSequential = false;
+    String mrAmLogLevel = "INFO";
     String version = TestDFSIO.class.getSimpleName() + ".1.8";
 
     LOG.info(version);
@@ -876,7 +878,9 @@ public class TestDFSIO implements Tool {
         bufferSize = Integer.parseInt(args[++i]);
       } else if (args[i].equals("-resFile")) {
         resFileName = args[++i];
-      } else {
+      } else if (args[i].equals("-mrAmLogLevel")) {
+        mrAmLogLevel = args[++i];
+      } else
         System.err.println("Illegal argument: " + args[i]);
         return -1;
       }
@@ -900,6 +904,7 @@ public class TestDFSIO implements Tool {
       LOG.info("compressionClass = " + compressionClass);
     }
 
+    config.set(MRJobConfig.MR_AM_LOG_LEVEL, mrAmLogLevel);
     config.setInt("test.io.file.buffer.size", bufferSize);
     config.setLong("test.io.skip.size", skipSize);
     config.setBoolean(DFSConfigKeys.DFS_SUPPORT_APPEND_KEY, true);
