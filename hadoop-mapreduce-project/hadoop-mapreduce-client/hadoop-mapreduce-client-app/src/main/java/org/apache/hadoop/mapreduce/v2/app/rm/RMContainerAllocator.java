@@ -1212,6 +1212,9 @@ public class RMContainerAllocator extends RMContainerRequestor
         // "if (maps.containsKey(tId))" below should be almost always true.
         // hence this while loop would almost always have O(1) complexity
         String host = allocated.getNodeId().getHost();
+        if (LOG.isDebugEnabled()) {
+          LOG.debug("trying for host " + host);
+        }
         LinkedList<TaskAttemptId> list = mapsHostMapping.get(host);
         while (list != null && list.size() > 0) {
           if (LOG.isDebugEnabled()) {
