@@ -942,7 +942,7 @@ public class RMContainerAllocator extends RMContainerRequestor
           }
           list.add(event.getAttemptID());
           if (LOG.isDebugEnabled()) {
-            LOG.debug("Added attempt req to host " + host);
+            LOG.debug("Added attempt " + event.getAttemptID() + " to host " + host);
           }
        }
        for (String rack: event.getRacks()) {
