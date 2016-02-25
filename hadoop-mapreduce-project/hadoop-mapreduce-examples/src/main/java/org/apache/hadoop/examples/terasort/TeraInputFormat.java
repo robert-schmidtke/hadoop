@@ -22,10 +22,10 @@ import java.io.DataOutputStream;
 import java.io.EOFException;
 import java.io.IOException;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.concurrent.ConcurrentHashMap;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataInputStream;
@@ -63,7 +63,7 @@ public class TeraInputFormat extends FileInputFormat<Text,Text> {
   private static MRJobConfig lastContext = null;
   private static List<InputSplit> lastResult = null;
   
-  private static final Map<String, TeraRecordReader> readers = new HashMap<String, TeraRecordReader>();
+  private static final Map<String, TeraRecordReader> readers = new ConcurrentHashMap<String, TeraRecordReader>();
 
   static class TextSampler implements IndexedSortable {
     private ArrayList<Text> records = new ArrayList<Text>();
