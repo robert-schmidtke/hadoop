@@ -22,7 +22,10 @@ import java.io.DataOutputStream;
 import java.io.EOFException;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Map.Entry;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataInputStream;
@@ -59,6 +62,8 @@ public class TeraInputFormat extends FileInputFormat<Text,Text> {
   static final int RECORD_LENGTH = KEY_LENGTH + VALUE_LENGTH;
   private static MRJobConfig lastContext = null;
   private static List<InputSplit> lastResult = null;
+  
+  private static final Map<String, TeraRecordReader> readers = new HashMap<String, TeraRecordReader>();
 
   static class TextSampler implements IndexedSortable {
     private ArrayList<Text> records = new ArrayList<Text>();
@@ -106,6 +111,19 @@ public class TeraInputFormat extends FileInputFormat<Text,Text> {
       }
       return result;
     }
+  }
+  
+  public static void printStats() {
+	  System.out.println("TeraInputFormat Stats:");
+	  for (Entry<String, TeraRecordReader> e : readers.entrySet()) {
+		  System.out.println("Job/Task/Split: " + e.getKey());
+		  System.out.println("\tTotal Read: " + e.getValue().totalRead);
+		  System.out.println("\tTotal Records: " + e.getValue().totalRecords);
+		  System.out.println("\tInit Millis: " + e.getValue().init);
+		  System.out.println("\tTotal Millis: " + e.getValue().totalMillis);
+		  System.out.println("\tClose Millis: " + e.getValue().close);
+	  }
+	  System.out.println();
   }
   
   /**
@@ -215,12 +233,17 @@ public class TeraInputFormat extends FileInputFormat<Text,Text> {
     private byte[] buffer = new byte[RECORD_LENGTH];
     private Text key;
     private Text value;
+    
+    public long totalRead = 0;
+    public long totalRecords = 0;
+    public long totalMillis = 0, init = 0, close = 0;
 
     public TeraRecordReader() throws IOException {
     }
 
     public void initialize(InputSplit split, TaskAttemptContext context) 
         throws IOException, InterruptedException {
+    	long _start = System.currentTimeMillis();
       Path p = ((FileSplit)split).getPath();
       FileSystem fs = p.getFileSystem(context.getConfiguration());
       in = fs.open(p);
@@ -229,10 +252,13 @@ public class TeraInputFormat extends FileInputFormat<Text,Text> {
       offset = (RECORD_LENGTH - (start % RECORD_LENGTH)) % RECORD_LENGTH;
       in.seek(start + offset);
       length = ((FileSplit)split).getLength();
+      init += System.currentTimeMillis() - _start;
     }
 
     public void close() throws IOException {
+    	long start = System.currentTimeMillis();
       in.close();
+      close += System.currentTimeMillis() - start;
     }
 
     public Text getCurrentKey() {
@@ -248,7 +274,9 @@ public class TeraInputFormat extends FileInputFormat<Text,Text> {
     }
 
     public boolean nextKeyValue() throws IOException {
+    	long start = System.currentTimeMillis();
       if (offset >= length) {
+    	  totalMillis += System.currentTimeMillis() - start;
         return false;
       }
       int read = 0;
@@ -256,8 +284,10 @@ public class TeraInputFormat extends FileInputFormat<Text,Text> {
         long newRead = in.read(buffer, read, RECORD_LENGTH - read);
         if (newRead == -1) {
           if (read == 0) {
+        	  totalMillis += System.currentTimeMillis() - start;
             return false;
           } else {
+        	  totalMillis += System.currentTimeMillis() - start;
             throw new EOFException("read past eof");
           }
         }
@@ -272,6 +302,9 @@ public class TeraInputFormat extends FileInputFormat<Text,Text> {
       key.set(buffer, 0, KEY_LENGTH);
       value.set(buffer, KEY_LENGTH, VALUE_LENGTH);
       offset += RECORD_LENGTH;
+      totalMillis += System.currentTimeMillis() - start;
+      ++totalRecords;
+      totalRead += read;
       return true;
     }
   }
@@ -280,7 +313,9 @@ public class TeraInputFormat extends FileInputFormat<Text,Text> {
   public RecordReader<Text, Text> 
       createRecordReader(InputSplit split, TaskAttemptContext context) 
       throws IOException {
-    return new TeraRecordReader();
+	  String id = "job" + context.getJobID() + "-task" + context.getTaskAttemptID() + "-split" + split.toString() + "-no" + readers.size();
+	  readers.put(id, new TeraRecordReader());
+    return readers.get(id);
   }
 
   @Override

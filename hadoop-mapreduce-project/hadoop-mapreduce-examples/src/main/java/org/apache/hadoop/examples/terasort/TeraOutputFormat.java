@@ -19,8 +19,12 @@
 package org.apache.hadoop.examples.terasort;
 
 import java.io.IOException;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Map.Entry;
 
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.examples.terasort.TeraInputFormat.TeraRecordReader;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
@@ -42,6 +46,8 @@ import org.apache.hadoop.mapreduce.security.TokenCache;
 public class TeraOutputFormat extends FileOutputFormat<Text,Text> {
   static final String FINAL_SYNC_ATTRIBUTE = "mapreduce.terasort.final.sync";
   private OutputCommitter committer = null;
+  
+  private static final Map<String, TeraRecordWriter> writers = new HashMap<String, TeraRecordWriter>();
 
   /**
    * Set the requirement for a final sync before the stream is closed.
@@ -60,24 +66,36 @@ public class TeraOutputFormat extends FileOutputFormat<Text,Text> {
   static class TeraRecordWriter extends RecordWriter<Text,Text> {
     private boolean finalSync = false;
     private FSDataOutputStream out;
+    
+    public long totalWritten = 0;
+    public long totalRecords = 0;
+    public long totalMillis = 0, init = 0, close = 0;
 
     public TeraRecordWriter(FSDataOutputStream out,
                             JobContext job) {
+    	long start = System.currentTimeMillis();
       finalSync = getFinalSync(job);
       this.out = out;
+      init += System.currentTimeMillis() - start;
     }
 
     public synchronized void write(Text key, 
                                    Text value) throws IOException {
+    	long start = System.currentTimeMillis();
       out.write(key.getBytes(), 0, key.getLength());
       out.write(value.getBytes(), 0, value.getLength());
+      totalMillis += System.currentTimeMillis() - start;
+      ++totalRecords;
+      totalWritten += key.getLength() + value.getLength();
     }
     
     public void close(TaskAttemptContext context) throws IOException {
+    	long start = System.currentTimeMillis();
       if (finalSync) {
         out.sync();
       }
       out.close();
+      close += System.currentTimeMillis();
     }
   }
 
@@ -116,13 +134,28 @@ public class TeraOutputFormat extends FileOutputFormat<Text,Text> {
       }
     }
   }
+  
+  public static void printStats() {
+	  System.out.println("TeraOutputFormat Stats:");
+	  for (Entry<String, TeraRecordWriter> e : writers.entrySet()) {
+		  System.out.println("Job/Task/Split: " + e.getKey());
+		  System.out.println("\tTotal Written: " + e.getValue().totalWritten);
+		  System.out.println("\tTotal Records: " + e.getValue().totalRecords);
+		  System.out.println("\tInit Millis: " + e.getValue().init);
+		  System.out.println("\tTotal Millis: " + e.getValue().totalMillis);
+		  System.out.println("\tClose Millis: " + e.getValue().close);
+	  }
+	  System.out.println();
+  }
 
   public RecordWriter<Text,Text> getRecordWriter(TaskAttemptContext job
                                                  ) throws IOException {
     Path file = getDefaultWorkFile(job, "");
     FileSystem fs = file.getFileSystem(job.getConfiguration());
      FSDataOutputStream fileOut = fs.create(file);
-    return new TeraRecordWriter(fileOut, job);
+     String id = "job" + job.getJobID() + "-task" + job.getTaskAttemptID() + "-no" + writers.size();
+     writers.put(id, new TeraRecordWriter(fileOut, job));
+    return writers.get(id);
   }
   
   public OutputCommitter getOutputCommitter(TaskAttemptContext context) 
