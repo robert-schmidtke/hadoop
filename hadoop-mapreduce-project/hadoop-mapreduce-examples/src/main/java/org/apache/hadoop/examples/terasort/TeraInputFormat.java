@@ -25,6 +25,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.Random;
 import java.util.concurrent.ConcurrentHashMap;
 
 import org.apache.hadoop.conf.Configuration;
@@ -313,7 +314,7 @@ public class TeraInputFormat extends FileInputFormat<Text,Text> {
   public RecordReader<Text, Text> 
       createRecordReader(InputSplit split, TaskAttemptContext context) 
       throws IOException {
-	  String id = "job" + context.getJobID() + "-task" + context.getTaskAttemptID() + "-split" + split.toString() + "-no" + readers.size();
+	  String id = "reader-" + new Random().nextInt();
 	  readers.put(id, new TeraRecordReader());
     return readers.get(id);
   }

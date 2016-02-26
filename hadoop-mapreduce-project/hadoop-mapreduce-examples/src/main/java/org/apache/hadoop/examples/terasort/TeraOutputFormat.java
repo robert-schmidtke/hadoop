@@ -22,9 +22,9 @@ import java.io.IOException;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.Random;
 
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.examples.terasort.TeraInputFormat.TeraRecordReader;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
@@ -153,7 +153,7 @@ public class TeraOutputFormat extends FileOutputFormat<Text,Text> {
     Path file = getDefaultWorkFile(job, "");
     FileSystem fs = file.getFileSystem(job.getConfiguration());
      FSDataOutputStream fileOut = fs.create(file);
-     String id = "job" + job.getJobID() + "-task" + job.getTaskAttemptID() + "-no" + writers.size();
+     String id = "writer" + new Random().nextInt();
      writers.put(id, new TeraRecordWriter(fileOut, job));
     return writers.get(id);
   }
