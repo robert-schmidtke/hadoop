@@ -2870,8 +2870,8 @@ public abstract class FileSystem extends Configured implements Closeable {
      * need.
      */
     public static class StatisticsData {
-      volatile long bytesRead;
-      volatile long bytesWritten;
+      volatile long bytesRead, timeRead;
+      volatile long bytesWritten, timeWritten;
       volatile int readOps;
       volatile int largeReadOps;
       volatile int writeOps;
@@ -2891,7 +2891,9 @@ public abstract class FileSystem extends Configured implements Closeable {
        */
       void add(StatisticsData other) {
         this.bytesRead += other.bytesRead;
+        this.timeRead += other.timeRead;
         this.bytesWritten += other.bytesWritten;
+        this.timeWritten += other.timeWritten;
         this.readOps += other.readOps;
         this.largeReadOps += other.largeReadOps;
         this.writeOps += other.writeOps;
@@ -2902,7 +2904,9 @@ public abstract class FileSystem extends Configured implements Closeable {
        */
       void negate() {
         this.bytesRead = -this.bytesRead;
+        this.timeRead = -this.timeRead;
         this.bytesWritten = -this.bytesWritten;
+        this.timeWritten = -this.timeWritten;
         this.readOps = -this.readOps;
         this.largeReadOps = -this.largeReadOps;
         this.writeOps = -this.writeOps;
@@ -2910,7 +2914,8 @@ public abstract class FileSystem extends Configured implements Closeable {
 
       @Override
       public String toString() {
-        return bytesRead + " bytes read, " + bytesWritten + " bytes written, "
+        return bytesRead + " bytes read (" + timeRead + "ms), "
+            + bytesWritten + " bytes written (" + timeWritten + "ms), "
             + readOps + " read ops, " + largeReadOps + " large read ops, "
             + writeOps + " write ops";
       }
@@ -2919,8 +2924,16 @@ public abstract class FileSystem extends Configured implements Closeable {
         return bytesRead;
       }
       
+      public long getTimeRead() {
+    	return timeRead;
+      }
+      
       public long getBytesWritten() {
         return bytesWritten;
+      }
+      
+      public long getTimeWritten() {
+    	return timeWritten;
       }
       
       public int getReadOps() {
@@ -3017,11 +3030,27 @@ public abstract class FileSystem extends Configured implements Closeable {
     }
     
     /**
+     * Increment the time read in the statistics
+     * @param newTime the additional time read
+     */
+    public void incrementTimeRead(long newTime) {
+      getThreadStatistics().timeRead += newTime;
+    }
+    
+    /**
      * Increment the bytes written in the statistics
      * @param newBytes the additional bytes written
      */
     public void incrementBytesWritten(long newBytes) {
       getThreadStatistics().bytesWritten += newBytes;
+    }
+    
+    /**
+     * Increment the time written in the statistics
+     * @param newTime the additional time written
+     */
+    public void incrementTimeWritten(long newTime) {
+      getThreadStatistics().timeWritten += newTime;
     }
     
     /**
@@ -3099,6 +3128,25 @@ public abstract class FileSystem extends Configured implements Closeable {
     }
     
     /**
+     * Get the total time read
+     * @return the time
+     */
+    public long getTimeRead() {
+      return visitAll(new StatisticsAggregator<Long>() {
+    	private long timeRead = 0;
+    	
+    	@Override
+    	public void accept(StatisticsData data) {
+    	  timeRead += data.timeRead;
+    	}
+    	
+    	public Long aggregate() {
+    	  return timeRead;
+    	}
+	  });
+    }
+    
+    /**
      * Get the total number of bytes written
      * @return the number of bytes
      */
@@ -3115,6 +3163,25 @@ public abstract class FileSystem extends Configured implements Closeable {
           return bytesWritten;
         }
       });
+    }
+    
+    /**
+     * Get the total time written
+     * @return the time
+     */
+    public long getTimeWritten() {
+      return visitAll(new StatisticsAggregator<Long>() {
+    	private long timeWritten = 0;
+    	
+    	@Override
+    	public void accept(StatisticsData data) {
+    	  timeWritten += data.timeWritten;
+    	}
+    	
+    	public Long aggregate() {
+    	  return timeWritten;
+    	}
+	  });
     }
     
     /**

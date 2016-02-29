@@ -214,7 +214,8 @@ public class DistributedFileSystem extends FileSystem {
       final long start, final long len) throws IOException {
     statistics.incrementReadOps(1);
     final Path absF = fixRelativePart(p);
-    return new FileSystemLinkResolver<BlockLocation[]>() {
+    long startTime = System.currentTimeMillis();
+    BlockLocation[] blockLocations = new FileSystemLinkResolver<BlockLocation[]>() {
       @Override
       public BlockLocation[] doCall(final Path p)
           throws IOException, UnresolvedLinkException {
@@ -226,6 +227,8 @@ public class DistributedFileSystem extends FileSystem {
         return fs.getFileBlockLocations(p, start, len);
       }
     }.resolve(this, absF);
+    statistics.incrementTimeRead(System.currentTimeMillis() - startTime);
+    return blockLocations;
   }
 
   /**
@@ -296,7 +299,8 @@ public class DistributedFileSystem extends FileSystem {
       throws IOException {
     statistics.incrementReadOps(1);
     Path absF = fixRelativePart(f);
-    return new FileSystemLinkResolver<FSDataInputStream>() {
+    long startTime = System.currentTimeMillis();
+    FSDataInputStream dataInputStream = new FileSystemLinkResolver<FSDataInputStream>() {
       @Override
       public FSDataInputStream doCall(final Path p)
           throws IOException, UnresolvedLinkException {
@@ -310,6 +314,8 @@ public class DistributedFileSystem extends FileSystem {
         return fs.open(p, bufferSize);
       }
     }.resolve(this, absF);
+    statistics.incrementTimeRead(System.currentTimeMillis() - startTime);
+    return dataInputStream;
   }
 
   @Override
@@ -333,7 +339,8 @@ public class DistributedFileSystem extends FileSystem {
       final int bufferSize, final Progressable progress) throws IOException {
     statistics.incrementWriteOps(1);
     Path absF = fixRelativePart(f);
-    return new FileSystemLinkResolver<FSDataOutputStream>() {
+    long startTime = System.currentTimeMillis();
+    FSDataOutputStream dataOutputStream = new FileSystemLinkResolver<FSDataOutputStream>() {
       @Override
       public FSDataOutputStream doCall(final Path p)
           throws IOException {
@@ -346,6 +353,8 @@ public class DistributedFileSystem extends FileSystem {
         return fs.append(p, bufferSize);
       }
     }.resolve(this, absF);
+    statistics.incrementTimeWritten(System.currentTimeMillis() - startTime);
+    return dataOutputStream;
   }
 
   /**
@@ -365,7 +374,8 @@ public class DistributedFileSystem extends FileSystem {
       final InetSocketAddress[] favoredNodes) throws IOException {
     statistics.incrementWriteOps(1);
     Path absF = fixRelativePart(f);
-    return new FileSystemLinkResolver<FSDataOutputStream>() {
+    long startTime = System.currentTimeMillis();
+    FSDataOutputStream dataOutputStream = new FileSystemLinkResolver<FSDataOutputStream>() {
       @Override
       public FSDataOutputStream doCall(final Path p)
           throws IOException {
@@ -378,6 +388,8 @@ public class DistributedFileSystem extends FileSystem {
         return fs.append(p, bufferSize);
       }
     }.resolve(this, absF);
+    statistics.incrementTimeWritten(System.currentTimeMillis() - startTime);
+    return dataOutputStream;
   }
 
   @Override
@@ -408,7 +420,8 @@ public class DistributedFileSystem extends FileSystem {
           throws IOException {
     statistics.incrementWriteOps(1);
     Path absF = fixRelativePart(f);
-    return new FileSystemLinkResolver<HdfsDataOutputStream>() {
+    long startTime = System.currentTimeMillis();
+    HdfsDataOutputStream dataOutputStream = new FileSystemLinkResolver<HdfsDataOutputStream>() {
       @Override
       public HdfsDataOutputStream doCall(final Path p)
           throws IOException, UnresolvedLinkException {
@@ -432,6 +445,8 @@ public class DistributedFileSystem extends FileSystem {
             + f + " -> " + p);
       }
     }.resolve(this, absF);
+    statistics.incrementTimeWritten(System.currentTimeMillis() - startTime);
+    return dataOutputStream;
   }
   
   @Override
@@ -441,7 +456,8 @@ public class DistributedFileSystem extends FileSystem {
     final ChecksumOpt checksumOpt) throws IOException {
     statistics.incrementWriteOps(1);
     Path absF = fixRelativePart(f);
-    return new FileSystemLinkResolver<FSDataOutputStream>() {
+    long startTime = System.currentTimeMillis();
+    FSDataOutputStream dataOutputStream = new FileSystemLinkResolver<FSDataOutputStream>() {
       @Override
       public FSDataOutputStream doCall(final Path p)
           throws IOException, UnresolvedLinkException {
@@ -457,6 +473,8 @@ public class DistributedFileSystem extends FileSystem {
             replication, blockSize, progress, checksumOpt);
       }
     }.resolve(this, absF);
+    statistics.incrementTimeWritten(System.currentTimeMillis() - startTime);
+    return dataOutputStream;
   }
 
   @Override
@@ -465,11 +483,14 @@ public class DistributedFileSystem extends FileSystem {
     short replication, long blockSize, Progressable progress,
     ChecksumOpt checksumOpt) throws IOException {
     statistics.incrementWriteOps(1);
+    long startTime = System.currentTimeMillis();
     final DFSOutputStream dfsos = dfs.primitiveCreate(
       getPathName(fixRelativePart(f)),
       absolutePermission, flag, true, replication, blockSize,
       progress, bufferSize, checksumOpt);
-    return dfs.createWrappedOutputStream(dfsos, statistics);
+    HdfsDataOutputStream dataOutputStream = dfs.createWrappedOutputStream(dfsos, statistics);
+    statistics.incrementTimeWritten(System.currentTimeMillis() - startTime);
+    return dataOutputStream;
   }
 
   /**
@@ -486,7 +507,8 @@ public class DistributedFileSystem extends FileSystem {
       flag.add(CreateFlag.CREATE);
     }
     Path absF = fixRelativePart(f);
-    return new FileSystemLinkResolver<FSDataOutputStream>() {
+    long startTime = System.currentTimeMillis();
+    FSDataOutputStream dataOutputStream = new FileSystemLinkResolver<FSDataOutputStream>() {
       @Override
       public FSDataOutputStream doCall(final Path p) throws IOException,
           UnresolvedLinkException {
@@ -502,6 +524,8 @@ public class DistributedFileSystem extends FileSystem {
             replication, blockSize, progress);
       }
     }.resolve(this, absF);
+    statistics.incrementTimeWritten(System.currentTimeMillis() - startTime);
+    return dataOutputStream;
   }
 
   @Override
@@ -510,7 +534,8 @@ public class DistributedFileSystem extends FileSystem {
                                ) throws IOException {
     statistics.incrementWriteOps(1);
     Path absF = fixRelativePart(src);
-    return new FileSystemLinkResolver<Boolean>() {
+    long startTime = System.currentTimeMillis();
+    boolean result = new FileSystemLinkResolver<Boolean>() {
       @Override
       public Boolean doCall(final Path p)
           throws IOException, UnresolvedLinkException {
@@ -522,6 +547,8 @@ public class DistributedFileSystem extends FileSystem {
         return fs.setReplication(p, replication);
       }
     }.resolve(this, absF);
+    statistics.incrementTimeWritten(System.currentTimeMillis() - startTime);
+    return result;
   }
 
   /**
@@ -534,6 +561,7 @@ public class DistributedFileSystem extends FileSystem {
       throws IOException {
     statistics.incrementWriteOps(1);
     Path absF = fixRelativePart(src);
+    long startTime = System.currentTimeMillis();
     new FileSystemLinkResolver<Void>() {
       @Override
       public Void doCall(final Path p)
@@ -554,12 +582,16 @@ public class DistributedFileSystem extends FileSystem {
         }
       }
     }.resolve(this, absF);
+    statistics.incrementTimeWritten(System.currentTimeMillis() - startTime);
   }
 
   /** Get all the existing storage policies */
   public BlockStoragePolicy[] getStoragePolicies() throws IOException {
     statistics.incrementReadOps(1);
-    return dfs.getStoragePolicies();
+    long startTime = System.currentTimeMillis();
+    BlockStoragePolicy[] policies = dfs.getStoragePolicies();
+    statistics.incrementTimeRead(System.currentTimeMillis() - startTime);
+    return policies;
   }
 
   /**
@@ -577,6 +609,7 @@ public class DistributedFileSystem extends FileSystem {
     Path absF = fixRelativePart(trg);
     // Make all srcs absolute
     Path[] srcs = new Path[psrcs.length];
+    long startTime = System.currentTimeMillis();
     for (int i=0; i<psrcs.length; i++) {
       srcs[i] = fixRelativePart(psrcs[i]);
     }
@@ -592,6 +625,7 @@ public class DistributedFileSystem extends FileSystem {
       // Fully resolve trg and srcs. Fail if any of them are a symlink.
       FileStatus stat = getFileLinkStatus(absF);
       if (stat.isSymlink()) {
+    	statistics.incrementTimeWritten(System.currentTimeMillis() - startTime);
         throw new IOException("Cannot concat with a symlink target: "
             + trg + " -> " + stat.getPath());
       }
@@ -599,6 +633,7 @@ public class DistributedFileSystem extends FileSystem {
       for (int i=0; i<psrcs.length; i++) {
         stat = getFileLinkStatus(srcs[i]);
         if (stat.isSymlink()) {
+          statistics.incrementTimeWritten(System.currentTimeMillis() - startTime);
           throw new IOException("Cannot concat with a symlink src: "
               + psrcs[i] + " -> " + stat.getPath());
         }
@@ -610,6 +645,7 @@ public class DistributedFileSystem extends FileSystem {
       }
       dfs.concat(getPathName(absF), srcsStr);
     }
+    statistics.incrementTimeWritten(System.currentTimeMillis() - startTime);
   }
 
   
@@ -623,12 +659,16 @@ public class DistributedFileSystem extends FileSystem {
 
     // Try the rename without resolving first
     try {
-      return dfs.rename(getPathName(absSrc), getPathName(absDst));
+      long startTime = System.currentTimeMillis();
+      boolean result = dfs.rename(getPathName(absSrc), getPathName(absDst));
+      statistics.incrementTimeWritten(System.currentTimeMillis() - startTime);
+      return result;
     } catch (UnresolvedLinkException e) {
       // Fully resolve the source
       final Path source = getFileLinkStatus(absSrc).getPath();
       // Keep trying to resolve the destination
-      return new FileSystemLinkResolver<Boolean>() {
+      long startTime = System.currentTimeMillis();
+      boolean result = new FileSystemLinkResolver<Boolean>() {
         @Override
         public Boolean doCall(final Path p)
             throws IOException, UnresolvedLinkException {
@@ -641,6 +681,8 @@ public class DistributedFileSystem extends FileSystem {
           return doCall(p);
         }
       }.resolve(this, absDst);
+      statistics.incrementTimeWritten(System.currentTimeMillis() - startTime);
+      return result;
     }
   }
 
@@ -656,11 +698,14 @@ public class DistributedFileSystem extends FileSystem {
     final Path absDst = fixRelativePart(dst);
     // Try the rename without resolving first
     try {
+      long startTime = System.currentTimeMillis();
       dfs.rename(getPathName(absSrc), getPathName(absDst), options);
+      statistics.incrementTimeWritten(System.currentTimeMillis() - startTime);
     } catch (UnresolvedLinkException e) {
       // Fully resolve the source
       final Path source = getFileLinkStatus(absSrc).getPath();
       // Keep trying to resolve the destination
+      long startTime = System.currentTimeMillis();
       new FileSystemLinkResolver<Void>() {
         @Override
         public Void doCall(final Path p)
@@ -675,6 +720,7 @@ public class DistributedFileSystem extends FileSystem {
           return doCall(p);
         }
       }.resolve(this, absDst);
+      statistics.incrementTimeWritten(System.currentTimeMillis() - startTime);
     }
   }
 
@@ -682,7 +728,8 @@ public class DistributedFileSystem extends FileSystem {
   public boolean truncate(Path f, final long newLength) throws IOException {
     statistics.incrementWriteOps(1);
     Path absF = fixRelativePart(f);
-    return new FileSystemLinkResolver<Boolean>() {
+    long startTime = System.currentTimeMillis();
+    boolean result = new FileSystemLinkResolver<Boolean>() {
       @Override
       public Boolean doCall(final Path p)
           throws IOException, UnresolvedLinkException {
@@ -694,13 +741,16 @@ public class DistributedFileSystem extends FileSystem {
         return fs.truncate(p, newLength);
       }
     }.resolve(this, absF);
+    statistics.incrementTimeWritten(System.currentTimeMillis() - startTime);
+    return result;
   }
 
   @Override
   public boolean delete(Path f, final boolean recursive) throws IOException {
     statistics.incrementWriteOps(1);
     Path absF = fixRelativePart(f);
-    return new FileSystemLinkResolver<Boolean>() {
+    long startTime = System.currentTimeMillis();
+    boolean result = new FileSystemLinkResolver<Boolean>() {
       @Override
       public Boolean doCall(final Path p)
           throws IOException, UnresolvedLinkException {
@@ -712,13 +762,16 @@ public class DistributedFileSystem extends FileSystem {
         return fs.delete(p, recursive);
       }
     }.resolve(this, absF);
+    statistics.incrementTimeWritten(System.currentTimeMillis() - startTime);
+    return result;
   }
   
   @Override
   public ContentSummary getContentSummary(Path f) throws IOException {
     statistics.incrementReadOps(1);
     Path absF = fixRelativePart(f);
-    return new FileSystemLinkResolver<ContentSummary>() {
+    long startTime = System.currentTimeMillis();
+    ContentSummary summary = new FileSystemLinkResolver<ContentSummary>() {
       @Override
       public ContentSummary doCall(final Path p)
           throws IOException, UnresolvedLinkException {
@@ -730,6 +783,8 @@ public class DistributedFileSystem extends FileSystem {
         return fs.getContentSummary(p);
       }
     }.resolve(this, absF);
+    statistics.incrementTimeRead(System.currentTimeMillis() - startTime);
+    return summary;
   }
 
   /** Set a directory's quotas
@@ -788,6 +843,7 @@ public class DistributedFileSystem extends FileSystem {
     String src = getPathName(p);
 
     // fetch the first batch of entries in the directory
+    long startTime = System.currentTimeMillis();
     DirectoryListing thisListing = dfs.listPaths(
         src, HdfsFileStatus.EMPTY_NAME);
 
@@ -801,6 +857,7 @@ public class DistributedFileSystem extends FileSystem {
       for (int i = 0; i < partialListing.length; i++) {
         stats[i] = partialListing[i].makeQualified(getUri(), p);
       }
+      statistics.incrementTimeRead(System.currentTimeMillis() - startTime);
       statistics.incrementReadOps(1);
       return stats;
     }
@@ -832,6 +889,7 @@ public class DistributedFileSystem extends FileSystem {
       statistics.incrementLargeReadOps(1);
     } while (thisListing.hasMore());
  
+    statistics.incrementTimeRead(System.currentTimeMillis() - startTime);
     return listing.toArray(new FileStatus[listing.size()]);
   }
 
@@ -941,8 +999,10 @@ public class DistributedFileSystem extends FileSystem {
       this.filter = filter;
       this.needLocation = needLocation;
       // fetch the first batch of entries in the directory
+      long startTime = System.currentTimeMillis();
       thisListing = dfs.listPaths(src, HdfsFileStatus.EMPTY_NAME,
           needLocation);
+      statistics.incrementTimeRead(System.currentTimeMillis() - startTime);
       statistics.incrementReadOps(1);
       if (thisListing == null) { // the directory does not exist
         throw new FileNotFoundException("File " + p + " does not exist.");
@@ -983,8 +1043,10 @@ public class DistributedFileSystem extends FileSystem {
       if (i >= thisListing.getPartialListing().length
           && thisListing.hasMore()) { 
         // current listing is exhausted & fetch a new listing
+    	long startTime = System.currentTimeMillis();
         thisListing = dfs.listPaths(src, thisListing.getLastName(),
             needLocation);
+        statistics.incrementTimeRead(System.currentTimeMillis() - startTime);
         statistics.incrementReadOps(1);
         if (thisListing == null) {
           return false;
@@ -1040,7 +1102,8 @@ public class DistributedFileSystem extends FileSystem {
       final boolean createParent) throws IOException {
     statistics.incrementWriteOps(1);
     Path absF = fixRelativePart(f);
-    return new FileSystemLinkResolver<Boolean>() {
+    long startTime = System.currentTimeMillis();
+    boolean result = new FileSystemLinkResolver<Boolean>() {
       @Override
       public Boolean doCall(final Path p)
           throws IOException, UnresolvedLinkException {
@@ -1059,6 +1122,8 @@ public class DistributedFileSystem extends FileSystem {
         return fs.mkdirs(p, permission);
       }
     }.resolve(this, absF);
+    statistics.incrementTimeWritten(System.currentTimeMillis() - startTime);
+    return result;
   }
 
   @SuppressWarnings("deprecation")
@@ -1066,7 +1131,10 @@ public class DistributedFileSystem extends FileSystem {
   protected boolean primitiveMkdir(Path f, FsPermission absolutePermission)
     throws IOException {
     statistics.incrementWriteOps(1);
-    return dfs.primitiveMkdir(getPathName(f), absolutePermission);
+    long startTime = System.currentTimeMillis();
+    boolean result = dfs.primitiveMkdir(getPathName(f), absolutePermission);
+    statistics.incrementTimeWritten(System.currentTimeMillis() - startTime);
+    return result;
   }
 
  
@@ -1111,7 +1179,10 @@ public class DistributedFileSystem extends FileSystem {
   @Override
   public FsStatus getStatus(Path p) throws IOException {
     statistics.incrementReadOps(1);
-    return dfs.getDiskStatus();
+    long startTime = System.currentTimeMillis();
+    FsStatus status = dfs.getDiskStatus();
+    statistics.incrementTimeRead(System.currentTimeMillis() - startTime);
+    return status;
   }
 
   /** Return the disk usage of the filesystem, including total capacity,
@@ -1298,7 +1369,8 @@ public class DistributedFileSystem extends FileSystem {
   public FileStatus getFileStatus(Path f) throws IOException {
     statistics.incrementReadOps(1);
     Path absF = fixRelativePart(f);
-    return new FileSystemLinkResolver<FileStatus>() {
+    long startTime = System.currentTimeMillis();
+    FileStatus status = new FileSystemLinkResolver<FileStatus>() {
       @Override
       public FileStatus doCall(final Path p) throws IOException,
           UnresolvedLinkException {
@@ -1315,6 +1387,8 @@ public class DistributedFileSystem extends FileSystem {
         return fs.getFileStatus(p);
       }
     }.resolve(this, absF);
+    statistics.incrementTimeRead(System.currentTimeMillis() - startTime);
+    return status;
   }
 
   @SuppressWarnings("deprecation")
@@ -1329,6 +1403,7 @@ public class DistributedFileSystem extends FileSystem {
     }
     statistics.incrementWriteOps(1);
     final Path absF = fixRelativePart(link);
+    long startTime = System.currentTimeMillis();
     new FileSystemLinkResolver<Void>() {
       @Override
       public Void doCall(final Path p) throws IOException,
@@ -1343,6 +1418,7 @@ public class DistributedFileSystem extends FileSystem {
         return null;
       }
     }.resolve(this, absF);
+    statistics.incrementTimeWritten(System.currentTimeMillis() - startTime);
   }
 
   @Override
@@ -1356,6 +1432,7 @@ public class DistributedFileSystem extends FileSystem {
       UnsupportedFileSystemException, IOException {
     statistics.incrementReadOps(1);
     final Path absF = fixRelativePart(f);
+    long startTime = System.currentTimeMillis();
     FileStatus status = new FileSystemLinkResolver<FileStatus>() {
       @Override
       public FileStatus doCall(final Path p) throws IOException,
@@ -1379,6 +1456,7 @@ public class DistributedFileSystem extends FileSystem {
           status.getPath(), status.getSymlink());
       status.setSymlink(targetQual);
     }
+    statistics.incrementTimeRead(System.currentTimeMillis() - startTime);
     return status;
   }
 
@@ -1387,7 +1465,8 @@ public class DistributedFileSystem extends FileSystem {
       FileNotFoundException, UnsupportedFileSystemException, IOException {
     statistics.incrementReadOps(1);
     final Path absF = fixRelativePart(f);
-    return new FileSystemLinkResolver<Path>() {
+    long startTime = System.currentTimeMillis();
+    Path target = new FileSystemLinkResolver<Path>() {
       @Override
       public Path doCall(final Path p) throws IOException,
           UnresolvedLinkException {
@@ -1404,15 +1483,20 @@ public class DistributedFileSystem extends FileSystem {
         return fs.getLinkTarget(p);
       }
     }.resolve(this, absF);
+    statistics.incrementTimeRead(System.currentTimeMillis() - startTime);
+    return target;
   }
 
   @Override
   protected Path resolveLink(Path f) throws IOException {
     statistics.incrementReadOps(1);
+    long startTime = System.currentTimeMillis();
     String target = dfs.getLinkTarget(getPathName(fixRelativePart(f)));
     if (target == null) {
+      statistics.incrementTimeRead(System.currentTimeMillis() - startTime);
       throw new FileNotFoundException("File does not exist: " + f.toString());
     }
+    statistics.incrementTimeRead(System.currentTimeMillis() - startTime);
     return new Path(target);
   }
 
@@ -1440,7 +1524,8 @@ public class DistributedFileSystem extends FileSystem {
       throws IOException {
     statistics.incrementReadOps(1);
     Path absF = fixRelativePart(f);
-    return new FileSystemLinkResolver<FileChecksum>() {
+    long startTime = System.currentTimeMillis();
+    FileChecksum checksum = new FileSystemLinkResolver<FileChecksum>() {
       @Override
       public FileChecksum doCall(final Path p)
           throws IOException, UnresolvedLinkException {
@@ -1459,6 +1544,8 @@ public class DistributedFileSystem extends FileSystem {
         }
       }
     }.resolve(this, absF);
+    statistics.incrementTimeRead(System.currentTimeMillis() - startTime);
+    return checksum;
   }
 
   @Override
@@ -1466,6 +1553,7 @@ public class DistributedFileSystem extends FileSystem {
       ) throws IOException {
     statistics.incrementWriteOps(1);
     Path absF = fixRelativePart(p);
+    long startTime = System.currentTimeMillis();
     new FileSystemLinkResolver<Void>() {
       @Override
       public Void doCall(final Path p)
@@ -1481,6 +1569,7 @@ public class DistributedFileSystem extends FileSystem {
         return null;
       }
     }.resolve(this, absF);
+    statistics.incrementTimeWritten(System.currentTimeMillis() - startTime);
   }
 
   @Override
@@ -1491,6 +1580,7 @@ public class DistributedFileSystem extends FileSystem {
     }
     statistics.incrementWriteOps(1);
     Path absF = fixRelativePart(p);
+    long startTime = System.currentTimeMillis();
     new FileSystemLinkResolver<Void>() {
       @Override
       public Void doCall(final Path p)
@@ -1506,6 +1596,7 @@ public class DistributedFileSystem extends FileSystem {
         return null;
       }
     }.resolve(this, absF);
+    statistics.incrementTimeWritten(System.currentTimeMillis() - startTime);
   }
 
   @Override
@@ -1513,6 +1604,7 @@ public class DistributedFileSystem extends FileSystem {
       ) throws IOException {
     statistics.incrementWriteOps(1);
     Path absF = fixRelativePart(p);
+    long startTime = System.currentTimeMillis();
     new FileSystemLinkResolver<Void>() {
       @Override
       public Void doCall(final Path p)
@@ -1528,6 +1620,7 @@ public class DistributedFileSystem extends FileSystem {
         return null;
       }
     }.resolve(this, absF);
+    statistics.incrementTimeWritten(System.currentTimeMillis() - startTime);
   }
   
 

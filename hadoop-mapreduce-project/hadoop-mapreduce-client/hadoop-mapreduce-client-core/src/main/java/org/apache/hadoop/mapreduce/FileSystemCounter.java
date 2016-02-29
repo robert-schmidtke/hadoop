@@ -23,7 +23,9 @@ import org.apache.hadoop.classification.InterfaceAudience;
 @InterfaceAudience.Private
 public enum FileSystemCounter {
   BYTES_READ,
+  TIME_READ,
   BYTES_WRITTEN,
+  TIME_WRITTEN,
   READ_OPS,
   LARGE_READ_OPS,
   WRITE_OPS,
