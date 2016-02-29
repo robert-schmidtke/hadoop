@@ -322,7 +322,7 @@ public abstract class AbstractCounters<C extends Counter,
    */
   @Override
   public synchronized String toString() {
-    StringBuilder sb = new StringBuilder("Counters: " + countCounters());
+    StringBuilder sb = new StringBuilder("Number of counters: " + countCounters());
     for (G group: this) {
       sb.append("\n\t").append(group.getDisplayName());
       for (Counter counter: group) {
