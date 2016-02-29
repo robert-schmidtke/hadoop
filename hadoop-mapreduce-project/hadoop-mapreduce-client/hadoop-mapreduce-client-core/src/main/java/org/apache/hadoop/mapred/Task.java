@@ -939,8 +939,8 @@ abstract public class Task implements Writable, Configurable {
    */
   class FileSystemStatisticUpdater {
     private List<FileSystem.Statistics> stats;
-    private Counters.Counter readBytesCounter, writeBytesCounter,
-        readOpsCounter, largeReadOpsCounter, writeOpsCounter;
+    private Counters.Counter readBytesCounter, readTimeCounter, writeBytesCounter,
+        writtenTimeCounter, readOpsCounter, largeReadOpsCounter, writeOpsCounter;
     private String scheme;
     FileSystemStatisticUpdater(List<FileSystem.Statistics> stats, String scheme) {
       this.stats = stats;
@@ -952,9 +952,17 @@ abstract public class Task implements Writable, Configurable {
         readBytesCounter = counters.findCounter(scheme,
             FileSystemCounter.BYTES_READ);
       }
+      if (readTimeCounter == null) {
+        readTimeCounter = counters.findCounter(scheme,
+            FileSystemCounter.TIME_READ);
+      }
       if (writeBytesCounter == null) {
         writeBytesCounter = counters.findCounter(scheme,
             FileSystemCounter.BYTES_WRITTEN);
+      }
+      if (writtenTimeCounter == null) {
+        writtenTimeCounter = counters.findCounter(scheme,
+            FileSystemCounter.TIME_WRITTEN);
       }
       if (readOpsCounter == null) {
         readOpsCounter = counters.findCounter(scheme,
@@ -968,20 +976,24 @@ abstract public class Task implements Writable, Configurable {
         writeOpsCounter = counters.findCounter(scheme,
             FileSystemCounter.WRITE_OPS);
       }
-      long readBytes = 0;
-      long writeBytes = 0;
+      long readBytes = 0, readTime = 0;
+      long writeBytes = 0, writtenTime = 0;
       long readOps = 0;
       long largeReadOps = 0;
       long writeOps = 0;
       for (FileSystem.Statistics stat: stats) {
         readBytes = readBytes + stat.getBytesRead();
+        readTime = readTime + stat.getTimeRead();
         writeBytes = writeBytes + stat.getBytesWritten();
+        writtenTime = writtenTime + stat.getTimeWritten();
         readOps = readOps + stat.getReadOps();
         largeReadOps = largeReadOps + stat.getLargeReadOps();
         writeOps = writeOps + stat.getWriteOps();
       }
       readBytesCounter.setValue(readBytes);
+      readTimeCounter.setValue(readTime);
       writeBytesCounter.setValue(writeBytes);
+      writtenTimeCounter.setValue(writtenTime);
       readOpsCounter.setValue(readOps);
       largeReadOpsCounter.setValue(largeReadOps);
       writeOpsCounter.setValue(writeOps);
