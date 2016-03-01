@@ -139,9 +139,11 @@ public class RawLocalFileSystem extends FileSystem {
     @Override
     public int read() throws IOException {
       try {
+    	long startTime = System.currentTimeMillis();
         int value = fis.read();
         if (value >= 0) {
           this.position++;
+          statistics.incrementTimeRead(System.currentTimeMillis() - startTime);
           statistics.incrementBytesRead(1);
         }
         return value;
@@ -153,9 +155,11 @@ public class RawLocalFileSystem extends FileSystem {
     @Override
     public int read(byte[] b, int off, int len) throws IOException {
       try {
+    	long startTime = System.currentTimeMillis();
         int value = fis.read(b, off, len);
         if (value > 0) {
           this.position += value;
+          statistics.incrementTimeRead(System.currentTimeMillis() - startTime);
           statistics.incrementBytesRead(value);
         }
         return value;
@@ -169,8 +173,10 @@ public class RawLocalFileSystem extends FileSystem {
       throws IOException {
       ByteBuffer bb = ByteBuffer.wrap(b, off, len);
       try {
+    	long startTime = System.currentTimeMillis();
         int value = fis.getChannel().read(bb, position);
         if (value > 0) {
+          statistics.incrementTimeRead(System.currentTimeMillis() - startTime);
           statistics.incrementBytesRead(value);
         }
         return value;

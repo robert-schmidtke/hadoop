@@ -47,17 +47,21 @@ public class FSDataOutputStream extends DataOutputStream
     }
 
     public void write(int b) throws IOException {
+      long startTime = System.currentTimeMillis();
       out.write(b);
       position++;
       if (statistics != null) {
+    	statistics.incrementTimeWritten(System.currentTimeMillis() - startTime);
         statistics.incrementBytesWritten(1);
       }
     }
     
     public void write(byte b[], int off, int len) throws IOException {
+      long startTime = System.currentTimeMillis();
       out.write(b, off, len);
       position += len;                            // update position
       if (statistics != null) {
+    	statistics.incrementTimeWritten(System.currentTimeMillis() - startTime);
         statistics.incrementBytesWritten(len);
       }
     }
