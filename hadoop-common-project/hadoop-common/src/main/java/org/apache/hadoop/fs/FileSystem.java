@@ -2923,12 +2923,12 @@ public abstract class FileSystem extends Configured implements Closeable {
        * Negate the values of all statistics.
        */
       void negate() {
-	    for (Entry<Long, Long> e : this.readBlockSizes) {
+	    for (Entry<Long, Long> e : this.readBlockSizes.entrySet()) {
 		  this.readBlockSizes.put(e.getKey(), -this.readBlockSizes.get(e.getKey()));
 	    }
         this.bytesRead = -this.bytesRead;
         this.timeRead = -this.timeRead;
-        for (Entry<Long, Long> e : this.writeBlockSizes) {
+        for (Entry<Long, Long> e : this.writeBlockSizes.entrySet()) {
   		  this.writeBlockSizes.put(e.getKey(), -this.writeBlockSizes.get(e.getKey()));
   	    }
         this.bytesWritten = -this.bytesWritten;
@@ -2941,15 +2941,15 @@ public abstract class FileSystem extends Configured implements Closeable {
       @Override
       public String toString() {
     	String readBlockSizesString = "";
-    	for (Entry<Long, Long> e : this.readBlockSizes) {
-    	  readBlockSizesString += "{" + e.getKey + "=" + e.getValue() + "}, ";
+    	for (Entry<Long, Long> e : this.readBlockSizes.entrySet()) {
+    	  readBlockSizesString += "{" + e.getKey() + "=" + e.getValue() + "}, ";
     	}
     	String writeBlockSizesString = "";
-    	for (Entry<Long, Long> e : this.writeBlockSizes) {
-          writeBlockSizesString += "{" + e.getKey + "=" + e.getValue() + "}, ";
+    	for (Entry<Long, Long> e : this.writeBlockSizes.entrySet()) {
+          writeBlockSizesString += "{" + e.getKey() + "=" + e.getValue() + "}, ";
     	}
         return "read block sizes " + readBlockSizesString + " write block sizes "
-    	    + writeBlockSizesString + " bytesRead + " bytes read (" + timeRead + "ms), "
+    	    + writeBlockSizesString + " bytes read " + bytesRead + "(" + timeRead + "ms), "
             + bytesWritten + " bytes written (" + timeWritten + "ms), "
             + readOps + " read ops, " + largeReadOps + " large read ops, "
             + writeOps + " write ops";
@@ -3087,7 +3087,7 @@ public abstract class FileSystem extends Configured implements Closeable {
     public void incrementReadBlockSize(long blockSize) {
       Long blockSizeRead = getThreadStatistics().readBlockSizes.get(blockSize);
       if (blockSizeRead == null) {
-      	blockSizeRead = 1;
+      	blockSizeRead = 1L;
       } else {
       	blockSizeRead += 1;
       }
@@ -3117,7 +3117,7 @@ public abstract class FileSystem extends Configured implements Closeable {
     public void incrementWrittenBlockSize(long blockSize) {
       Long blockSizeWritten = getThreadStatistics().writeBlockSizes.get(blockSize);
       if (blockSizeWritten == null) {
-      	blockSizeWritten = 1;
+      	blockSizeWritten = 1L;
       } else {
       	blockSizeWritten += 1;
       }
@@ -3223,7 +3223,7 @@ public abstract class FileSystem extends Configured implements Closeable {
 		
 	    @Override
 	    public void accept(StatisticsData data) {
-		  for (Entry<Long, Long> e : data.readBlockSizes) {
+		  for (Entry<Long, Long> e : data.readBlockSizes.entrySet()) {
 		    Long blockSizeRead = blockSizesRead.get(e.getKey());
 		    if (blockSizeRead == null) {
 			  blockSizeRead = e.getValue();
@@ -3284,7 +3284,7 @@ public abstract class FileSystem extends Configured implements Closeable {
 	
 	    @Override
 	    public void accept(StatisticsData data) {
-		  for (Entry<Long, Long> e : data.writeBlockSizes) {
+		  for (Entry<Long, Long> e : data.writeBlockSizes.entrySet()) {
 			Long blockSizeWritten = blockSizesWritten.get(e.getKey());
 			if (blockSizeWritten == null) {
 			  blockSizeWritten = e.getValue();
