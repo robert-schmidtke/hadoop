@@ -53,6 +53,7 @@ public class FSDataOutputStream extends DataOutputStream
       if (statistics != null) {
     	statistics.incrementTimeWritten(System.currentTimeMillis() - startTime);
         statistics.incrementBytesWritten(1);
+        statistics.incrementWriteBlockSize(1);
       }
     }
     
@@ -63,6 +64,7 @@ public class FSDataOutputStream extends DataOutputStream
       if (statistics != null) {
     	statistics.incrementTimeWritten(System.currentTimeMillis() - startTime);
         statistics.incrementBytesWritten(len);
+        statistics.incrementWriteBlockSize(len);
       }
     }
       

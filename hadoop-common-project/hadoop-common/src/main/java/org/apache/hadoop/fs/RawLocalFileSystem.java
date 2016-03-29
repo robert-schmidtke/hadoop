@@ -145,6 +145,7 @@ public class RawLocalFileSystem extends FileSystem {
           this.position++;
           statistics.incrementTimeRead(System.currentTimeMillis() - startTime);
           statistics.incrementBytesRead(1);
+          statistics.incrementReadBlockSize(1);
         }
         return value;
       } catch (IOException e) {                 // unexpected exception
@@ -161,6 +162,7 @@ public class RawLocalFileSystem extends FileSystem {
           this.position += value;
           statistics.incrementTimeRead(System.currentTimeMillis() - startTime);
           statistics.incrementBytesRead(value);
+          statistics.incrementReadBlockSize(len);
         }
         return value;
       } catch (IOException e) {                 // unexpected exception
@@ -178,6 +180,7 @@ public class RawLocalFileSystem extends FileSystem {
         if (value > 0) {
           statistics.incrementTimeRead(System.currentTimeMillis() - startTime);
           statistics.incrementBytesRead(value);
+          statistics.incrementReadBlockSize(len);
         }
         return value;
       } catch (IOException e) {
