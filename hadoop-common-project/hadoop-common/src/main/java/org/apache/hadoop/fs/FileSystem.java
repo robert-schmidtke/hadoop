@@ -34,6 +34,7 @@ import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.util.Map.Entry;
 import java.util.NoSuchElementException;
 import java.util.ServiceLoader;
 import java.util.Set;
@@ -2870,6 +2871,7 @@ public abstract class FileSystem extends Configured implements Closeable {
      * need.
      */
     public static class StatisticsData {
+      volatile Map<Long, Long> readBlockSizes, writeBlockSizes;
       volatile long bytesRead, timeRead;
       volatile long bytesWritten, timeWritten;
       volatile int readOps;
@@ -2891,9 +2893,27 @@ public abstract class FileSystem extends Configured implements Closeable {
        */
       void add(StatisticsData other) {
         this.bytesRead += other.bytesRead;
+        for (Entry<Long, Long> e : other.readBlockSizes.entrySet()) {
+          Long readBlockSize = this.readBlockSizes.get(e.getKey());
+          if (readBlockSize == null) {
+        	readBlockSize = e.getValue();
+          } else {
+        	readBlockSize += e.getValue();
+          }
+          this.readBlockSizes.put(e.getKey(), readBlockSize);
+        }
         this.timeRead += other.timeRead;
         this.bytesWritten += other.bytesWritten;
         this.timeWritten += other.timeWritten;
+        for (Entry<Long, Long> e : other.writeBlockSizes.entrySet()) {
+          Long writeBlockSize = this.writeBlockSizes.get(e.getKey());
+          if (writeBlockSize == null) {
+      	    writeBlockSize = e.getValue();
+          } else {
+      	    writeBlockSize += e.getValue();
+          }
+          this.writeBlockSizes.put(e.getKey(), writeBlockSize);
+      }
         this.readOps += other.readOps;
         this.largeReadOps += other.largeReadOps;
         this.writeOps += other.writeOps;
@@ -2903,8 +2923,14 @@ public abstract class FileSystem extends Configured implements Closeable {
        * Negate the values of all statistics.
        */
       void negate() {
+	    for (Entry<Long, Long> e : this.readBlockSizes) {
+		  this.readBlockSizes.put(e.getKey(), -this.readBlockSizes.get(e.getKey()));
+	    }
         this.bytesRead = -this.bytesRead;
         this.timeRead = -this.timeRead;
+        for (Entry<Long, Long> e : this.writeBlockSizes) {
+  		  this.writeBlockSizes.put(e.getKey(), -this.writeBlockSizes.get(e.getKey()));
+  	    }
         this.bytesWritten = -this.bytesWritten;
         this.timeWritten = -this.timeWritten;
         this.readOps = -this.readOps;
@@ -2914,7 +2940,16 @@ public abstract class FileSystem extends Configured implements Closeable {
 
       @Override
       public String toString() {
-        return bytesRead + " bytes read (" + timeRead + "ms), "
+    	String readBlockSizesString = "";
+    	for (Entry<Long, Long> e : this.readBlockSizes) {
+    	  readBlockSizesString += "{" + e.getKey + "=" + e.getValue() + "}, ";
+    	}
+    	String writeBlockSizesString = "";
+    	for (Entry<Long, Long> e : this.writeBlockSizes) {
+          writeBlockSizesString += "{" + e.getKey + "=" + e.getValue() + "}, ";
+    	}
+        return "read block sizes " + readBlockSizesString + " write block sizes "
+    	    + writeBlockSizesString + " bytesRead + " bytes read (" + timeRead + "ms), "
             + bytesWritten + " bytes written (" + timeWritten + "ms), "
             + readOps + " read ops, " + largeReadOps + " large read ops, "
             + writeOps + " write ops";
@@ -2928,12 +2963,20 @@ public abstract class FileSystem extends Configured implements Closeable {
     	return timeRead;
       }
       
+      public Map<Long, Long> getReadBlockSizes() {
+        return readBlockSizes;
+      }
+      
       public long getBytesWritten() {
         return bytesWritten;
       }
       
       public long getTimeWritten() {
     	return timeWritten;
+      }
+      
+      public Map<Long, Long> getWriteBlockSizes() {
+    	return writeBlockSizes;
       }
       
       public int getReadOps() {
@@ -3038,6 +3081,20 @@ public abstract class FileSystem extends Configured implements Closeable {
     }
     
     /**
+     * Increment the number of times a block size has been read
+     * @param blockSize the block size to increement
+     */
+    public void incrementReadBlockSize(long blockSize) {
+      Long blockSizeRead = getThreadStatistics().readBlockSizes.get(blockSize);
+      if (blockSizeRead == null) {
+      	blockSizeRead = 1;
+      } else {
+      	blockSizeRead += 1;
+      }
+      getThreadStatistics().readBlockSizes.put(blockSize, blockSizeRead);
+    }
+    
+    /**
      * Increment the bytes written in the statistics
      * @param newBytes the additional bytes written
      */
@@ -3051,6 +3108,20 @@ public abstract class FileSystem extends Configured implements Closeable {
      */
     public void incrementTimeWritten(long newTime) {
       getThreadStatistics().timeWritten += newTime;
+    }
+    
+    /**
+     * Increment the number of times a block size has been written
+     * @param blockSize the block size to increement
+     */
+    public void incrementWrittenBlockSize(long blockSize) {
+      Long blockSizeWritten = getThreadStatistics().writeBlockSizes.get(blockSize);
+      if (blockSizeWritten == null) {
+      	blockSizeWritten = 1;
+      } else {
+      	blockSizeWritten += 1;
+      }
+      getThreadStatistics().writeBlockSizes.put(blockSize, blockSizeWritten);
     }
     
     /**
@@ -3146,6 +3217,29 @@ public abstract class FileSystem extends Configured implements Closeable {
 	  });
     }
     
+    public Map<Long, Long> getReadBlockSizes() {
+      return visitAll(new StatisticsAggregator<Map<Long, Long>>() {
+	    private Map<Long, Long> blockSizesRead = new HashMap<Long, Long>();
+		
+	    @Override
+	    public void accept(StatisticsData data) {
+		  for (Entry<Long, Long> e : data.readBlockSizes) {
+		    Long blockSizeRead = blockSizesRead.get(e.getKey());
+		    if (blockSizeRead == null) {
+			  blockSizeRead = e.getValue();
+		    } else {
+			  blockSizeRead += e.getValue();
+		    }
+		    blockSizesRead.put(e.getKey(), blockSizeRead);
+		  }
+	    }
+		
+	    public Map<Long, Long> aggregate() {
+	      return blockSizesRead;
+	    }
+      });
+    }
+    
     /**
      * Get the total number of bytes written
      * @return the number of bytes
@@ -3182,6 +3276,29 @@ public abstract class FileSystem extends Configured implements Closeable {
     	  return timeWritten;
     	}
 	  });
+    }
+    
+    public Map<Long, Long> getWriteBlockSizes() {
+      return visitAll(new StatisticsAggregator<Map<Long, Long>>() {
+	    private Map<Long, Long> blockSizesWritten = new HashMap<Long, Long>();
+	
+	    @Override
+	    public void accept(StatisticsData data) {
+		  for (Entry<Long, Long> e : data.writeBlockSizes) {
+			Long blockSizeWritten = blockSizesWritten.get(e.getKey());
+			if (blockSizeWritten == null) {
+			  blockSizeWritten = e.getValue();
+			} else {
+			  blockSizeWritten += e.getValue();
+			}
+			blockSizesWritten.put(e.getKey(), blockSizeWritten);
+		  }
+	    }
+	
+	    public Map<Long, Long> aggregate() {
+		  return blockSizesWritten;
+	    }
+      });
     }
     
     /**
