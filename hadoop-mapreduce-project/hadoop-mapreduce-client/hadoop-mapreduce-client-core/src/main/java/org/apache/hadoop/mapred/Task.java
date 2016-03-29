@@ -940,7 +940,8 @@ abstract public class Task implements Writable, Configurable {
   class FileSystemStatisticUpdater {
     private List<FileSystem.Statistics> stats;
     private Counters.Counter readBytesCounter, readTimeCounter, writeBytesCounter,
-        writtenTimeCounter, readOpsCounter, largeReadOpsCounter, writeOpsCounter;
+        writtenTimeCounter, readOpsCounter, largeReadOpsCounter, writeOpsCounter,
+        readBlockSizesCounter, writeBlockSizesCounter;
     private String scheme;
     FileSystemStatisticUpdater(List<FileSystem.Statistics> stats, String scheme) {
       this.stats = stats;
@@ -956,6 +957,10 @@ abstract public class Task implements Writable, Configurable {
         readTimeCounter = counters.findCounter(scheme,
             FileSystemCounter.TIME_READ);
       }
+      if (readBlockSizesCounter == null) {
+        readBlockSizesCounter = counters.findCounter(scheme,
+    	    FileSystemCounter.BLOCK_READ);
+      }
       if (writeBytesCounter == null) {
         writeBytesCounter = counters.findCounter(scheme,
             FileSystemCounter.BYTES_WRITTEN);
@@ -964,6 +969,10 @@ abstract public class Task implements Writable, Configurable {
         writtenTimeCounter = counters.findCounter(scheme,
             FileSystemCounter.TIME_WRITTEN);
       }
+      if (writtenBlockSizesCounter == null) {
+          writtenBlockSizesCounter = counters.findCounter(scheme,
+      	    FileSystemCounter.BLOCK_WRITE);
+        }
       if (readOpsCounter == null) {
         readOpsCounter = counters.findCounter(scheme,
             FileSystemCounter.READ_OPS);
@@ -977,13 +986,33 @@ abstract public class Task implements Writable, Configurable {
             FileSystemCounter.WRITE_OPS);
       }
       long readBytes = 0, readTime = 0;
+      Map<Long, Long> readBlockSizes = new HashMap<Long, Long>();
       long writeBytes = 0, writtenTime = 0;
+      Map<Long, Long> writeBlockSizes = new HashMap<Long, Long>();
       long readOps = 0;
       long largeReadOps = 0;
       long writeOps = 0;
       for (FileSystem.Statistics stat: stats) {
+    	  for (Entry<Long, Long> e : stat.getReadBlockSizes().entrySet()) {
+    		  Long bs = readBlockSizes.get(e.getKey());
+    		  if (bs == null) {
+    			  bs = e.getValue();
+    		  } else {
+    			  bs += e.getValue();
+    		  }
+    		  readBlockSizes.put(e.getKey(), bs);
+    	  }
         readBytes = readBytes + stat.getBytesRead();
         readTime = readTime + stat.getTimeRead();
+        for (Entry<Long, Long> e : stat.getWriteBlockSizes().entrySet()) {
+  		  Long bs = writeBlockSizes.get(e.getKey());
+  		  if (bs == null) {
+  			  bs = e.getValue();
+  		  } else {
+  			  bs += e.getValue();
+  		  }
+  		  writeBlockSizes.put(e.getKey(), bs);
+  	  }
         writeBytes = writeBytes + stat.getBytesWritten();
         writtenTime = writtenTime + stat.getTimeWritten();
         readOps = readOps + stat.getReadOps();
