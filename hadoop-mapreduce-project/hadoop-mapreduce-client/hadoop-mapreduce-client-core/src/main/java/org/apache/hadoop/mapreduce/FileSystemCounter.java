@@ -24,8 +24,10 @@ import org.apache.hadoop.classification.InterfaceAudience;
 public enum FileSystemCounter {
   BYTES_READ,
   TIME_READ,
+  BLOCK_READ,
   BYTES_WRITTEN,
   TIME_WRITTEN,
+  BLOCK_WRITE,
   READ_OPS,
   LARGE_READ_OPS,
   WRITE_OPS,

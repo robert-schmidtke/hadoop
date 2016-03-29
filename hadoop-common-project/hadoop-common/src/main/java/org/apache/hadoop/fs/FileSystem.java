@@ -2871,7 +2871,8 @@ public abstract class FileSystem extends Configured implements Closeable {
      * need.
      */
     public static class StatisticsData {
-      volatile Map<Long, Long> readBlockSizes, writeBlockSizes;
+      volatile Map<Long, Long> readBlockSizes = new HashMap<Long, Long>();
+      volatile Map<Long, Long> writeBlockSizes = new HashMap<Long, Long>();
       volatile long bytesRead, timeRead;
       volatile long bytesWritten, timeWritten;
       volatile int readOps;
