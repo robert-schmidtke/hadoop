@@ -942,7 +942,8 @@ abstract public class Task implements Writable, Configurable {
     private List<FileSystem.Statistics> stats;
     private Counters.Counter readBytesCounter, readTimeCounter, writeBytesCounter,
         writtenTimeCounter, readOpsCounter, largeReadOpsCounter, writeOpsCounter;
-    private final String[] blockSizes = { "1K", "2K", "4K", "8K", "16K", "32K", "64K", "128K", "256K", "512K",
+    private final String[] blockSizes = { "1B", "2B", "4B", "8B", "16B", "32B", "64B", "128B", "256B", "512B",
+                                          "1K", "2K", "4K", "8K", "16K", "32K", "64K", "128K", "256K", "512K",
                                           "1M", "2M", "4M", "8M", "16M", "32M", "64M", "128M", "256M", "512M",
                                           "1G" , "_BIG" };
     private Counters.Counter[] readBlockSizesCounters = new Counters.Counter[blockSizes.length];
@@ -1031,13 +1032,13 @@ abstract public class Task implements Writable, Configurable {
       readBytesCounter.setValue(readBytes);
       readTimeCounter.setValue(readTime);
       for (Entry<Long, Long> e : readBlockSizes.entrySet()) {
-        int i = Math.min(Math.max((int) Math.ceil(Math.log(e.getValue()) / Math.log(2)) - 10, 0), blockSizes.length - 1);
+        int i = Math.min((int) Math.ceil(Math.log(e.getValue()) / Math.log(2)), blockSizes.length - 1);
         readBlockSizesCounters[i].increment(e.getValue());
       }
       writeBytesCounter.setValue(writeBytes);
       writtenTimeCounter.setValue(writtenTime);
       for (Entry<Long, Long> e : writeBlockSizes.entrySet()) {
-        int i = Math.min(Math.max((int) Math.ceil(Math.log(e.getValue()) / Math.log(2)) - 10, 0), blockSizes.length - 1);
+        int i = Math.min((int) Math.ceil(Math.log(e.getValue()) / Math.log(2)), blockSizes.length - 1);
         writtenBlockSizesCounters[i].increment(e.getValue());
       }
       readOpsCounter.setValue(readOps);
