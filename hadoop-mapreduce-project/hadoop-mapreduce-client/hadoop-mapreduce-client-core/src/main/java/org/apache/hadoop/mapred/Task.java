@@ -29,6 +29,7 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Map.Entry;
 import java.util.NoSuchElementException;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -969,8 +970,8 @@ abstract public class Task implements Writable, Configurable {
         writtenTimeCounter = counters.findCounter(scheme,
             FileSystemCounter.TIME_WRITTEN);
       }
-      if (writtenBlockSizesCounter == null) {
-          writtenBlockSizesCounter = counters.findCounter(scheme,
+      if (writeBlockSizesCounter == null) {
+          writeBlockSizesCounter = counters.findCounter(scheme,
       	    FileSystemCounter.BLOCK_WRITE);
         }
       if (readOpsCounter == null) {
