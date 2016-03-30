@@ -2924,14 +2924,14 @@ public abstract class FileSystem extends Configured implements Closeable {
        * Negate the values of all statistics.
        */
       void negate() {
-	    for (Entry<Long, Long> e : this.readBlockSizes.entrySet()) {
-		  this.readBlockSizes.put(e.getKey(), -this.readBlockSizes.get(e.getKey()));
-	    }
+        for (Entry<Long, Long> e : this.readBlockSizes.entrySet()) {
+          e.setValue(-e.getValue());
+        }
         this.bytesRead = -this.bytesRead;
         this.timeRead = -this.timeRead;
         for (Entry<Long, Long> e : this.writeBlockSizes.entrySet()) {
-  		  this.writeBlockSizes.put(e.getKey(), -this.writeBlockSizes.get(e.getKey()));
-  	    }
+          e.setValue(-e.getValue());
+        }
         this.bytesWritten = -this.bytesWritten;
         this.timeWritten = -this.timeWritten;
         this.readOps = -this.readOps;
