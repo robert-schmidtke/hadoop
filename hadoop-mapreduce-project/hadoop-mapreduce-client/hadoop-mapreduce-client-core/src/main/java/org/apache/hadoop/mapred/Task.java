@@ -941,8 +941,12 @@ abstract public class Task implements Writable, Configurable {
   class FileSystemStatisticUpdater {
     private List<FileSystem.Statistics> stats;
     private Counters.Counter readBytesCounter, readTimeCounter, writeBytesCounter,
-        writtenTimeCounter, readOpsCounter, largeReadOpsCounter, writeOpsCounter,
-        readBlockSizesCounter, writeBlockSizesCounter;
+        writtenTimeCounter, readOpsCounter, largeReadOpsCounter, writeOpsCounter;
+    private final String[] blockSizes = { "1K", "2K", "4K", "8K", "16K", "32K", "64K", "128K", "256K", "512K",
+                                          "1M", "2M", "4M", "8M", "16M", "32M", "64M", "128M", "256M", "512M",
+                                          "1G" , "_BIG" };
+    private Counters.Counter[] readBlockSizesCounters = new Counters.Counter[blockSizes.length];
+    private Counters.Counter[] writtenBlockSizesCounters = new Counters.Counter[blockSizes.length];
     private String scheme;
     FileSystemStatisticUpdater(List<FileSystem.Statistics> stats, String scheme) {
       this.stats = stats;
@@ -958,9 +962,11 @@ abstract public class Task implements Writable, Configurable {
         readTimeCounter = counters.findCounter(scheme,
             FileSystemCounter.TIME_READ);
       }
-      if (readBlockSizesCounter == null) {
-        readBlockSizesCounter = counters.findCounter(scheme,
-    	    FileSystemCounter.BLOCK_READ);
+      for (int i = 0; i < blockSizes.length; ++i) {
+        if (readBlockSizesCounters[i] == null) {
+          readBlockSizesCounters[i] = counters.findCounter(scheme,
+    	      FileSystemCounter.valueOf(FileSystemCounter.BLOCK_READ.name() + blockSizes[i]));
+        }
       }
       if (writeBytesCounter == null) {
         writeBytesCounter = counters.findCounter(scheme,
@@ -970,10 +976,12 @@ abstract public class Task implements Writable, Configurable {
         writtenTimeCounter = counters.findCounter(scheme,
             FileSystemCounter.TIME_WRITTEN);
       }
-      if (writeBlockSizesCounter == null) {
-          writeBlockSizesCounter = counters.findCounter(scheme,
-      	    FileSystemCounter.BLOCK_WRITE);
+      for (int i = 0; i < blockSizes.length; ++i) {
+        if (writtenBlockSizesCounters[i] == null) {
+          writtenBlockSizesCounters[i] = counters.findCounter(scheme,
+      	    FileSystemCounter.valueOf(FileSystemCounter.BLOCK_WRITTEN.name() + blockSizes[i]));
         }
+      }
       if (readOpsCounter == null) {
         readOpsCounter = counters.findCounter(scheme,
             FileSystemCounter.READ_OPS);
@@ -1022,8 +1030,16 @@ abstract public class Task implements Writable, Configurable {
       }
       readBytesCounter.setValue(readBytes);
       readTimeCounter.setValue(readTime);
+      for (Entry<Long, Long> e : readBlockSizes.entrySet()) {
+        int i = Math.min(Math.max((int) Math.ceil(Math.log(e.getValue()) / Math.log(2)) - 10, 0), blockSizes.length - 1);
+        readBlockSizesCounters[i].increment(e.getValue());
+      }
       writeBytesCounter.setValue(writeBytes);
       writtenTimeCounter.setValue(writtenTime);
+      for (Entry<Long, Long> e : writeBlockSizes.entrySet()) {
+        int i = Math.min(Math.max((int) Math.ceil(Math.log(e.getValue()) / Math.log(2)) - 10, 0), blockSizes.length - 1);
+        writtenBlockSizesCounters[i].increment(e.getValue());
+      }
       readOpsCounter.setValue(readOps);
       largeReadOpsCounter.setValue(largeReadOps);
       writeOpsCounter.setValue(writeOps);
