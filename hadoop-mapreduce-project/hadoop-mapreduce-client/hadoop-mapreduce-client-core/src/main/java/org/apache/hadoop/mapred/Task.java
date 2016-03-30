@@ -1032,13 +1032,13 @@ abstract public class Task implements Writable, Configurable {
       readBytesCounter.setValue(readBytes);
       readTimeCounter.setValue(readTime);
       for (Entry<Long, Long> e : readBlockSizes.entrySet()) {
-        int i = Math.min((int) Math.ceil(Math.log(e.getValue()) / Math.log(2)), blockSizes.length - 1);
+        int i = Math.min((int) Math.ceil(Math.log(e.getKey()) / Math.log(2)), blockSizes.length - 1);
         readBlockSizesCounters[i].increment(e.getValue());
       }
       writeBytesCounter.setValue(writeBytes);
       writtenTimeCounter.setValue(writtenTime);
       for (Entry<Long, Long> e : writeBlockSizes.entrySet()) {
-        int i = Math.min((int) Math.ceil(Math.log(e.getValue()) / Math.log(2)), blockSizes.length - 1);
+        int i = Math.min((int) Math.ceil(Math.log(e.getKey()) / Math.log(2)), blockSizes.length - 1);
         writtenBlockSizesCounters[i].increment(e.getValue());
       }
       readOpsCounter.setValue(readOps);
