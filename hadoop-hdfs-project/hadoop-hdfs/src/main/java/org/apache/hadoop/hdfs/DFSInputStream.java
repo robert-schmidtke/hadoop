@@ -860,6 +860,7 @@ implements ByteBufferReadable, CanSetDropBehind, CanSetReadahead,
           }
           if (dfsClient.stats != null) {
             dfsClient.stats.incrementBytesRead(result);
+            dfsClient.stats.incrementReadBlockSize(result);
           }
           return result;
         } catch (ChecksumException ce) {
@@ -1425,6 +1426,7 @@ implements ByteBufferReadable, CanSetDropBehind, CanSetReadahead,
     assert remaining == 0 : "Wrong number of bytes read.";
     if (dfsClient.stats != null) {
       dfsClient.stats.incrementBytesRead(realLen);
+      dfsClient.stats.incrementReadBlockSize(realLen);
     }
     return realLen;
   }

@@ -1031,19 +1031,25 @@ abstract public class Task implements Writable, Configurable {
       }
       readBytesCounter.setValue(readBytes);
       readTimeCounter.setValue(readTime);
+      long allRead = 0L;
       for (Entry<Long, Long> e : readBlockSizes.entrySet()) {
         int i = Math.min((int) Math.ceil(Math.log(e.getKey()) / Math.log(2)), blockSizes.length - 1);
         readBlockSizesCounters[i].increment(e.getValue());
+        allRead += e.getKey() * e.getValue();
       }
       writeBytesCounter.setValue(writeBytes);
       writtenTimeCounter.setValue(writtenTime);
+      long allWritten = 0L;
       for (Entry<Long, Long> e : writeBlockSizes.entrySet()) {
         int i = Math.min((int) Math.ceil(Math.log(e.getKey()) / Math.log(2)), blockSizes.length - 1);
         writtenBlockSizesCounters[i].increment(e.getValue());
+        allWritten += e.getKey() * e.getValue();
       }
       readOpsCounter.setValue(readOps);
       largeReadOpsCounter.setValue(largeReadOps);
       writeOpsCounter.setValue(writeOps);
+      if (allRead != readBytes) System.out.println("allRead is not readBytes: " + allRead + ", " + readBytes);
+      if (allWritten != writeBytes) System.out.println("allWritten is not writeBytes: " + allWritten + ", " + writeBytes);
     }
   }
   
