@@ -1048,8 +1048,8 @@ abstract public class Task implements Writable, Configurable {
       readOpsCounter.setValue(readOps);
       largeReadOpsCounter.setValue(largeReadOps);
       writeOpsCounter.setValue(writeOps);
-      if (allRead != readBytes) System.out.println("allRead is not readBytes: " + allRead + ", " + readBytes);
-      if (allWritten != writeBytes) System.out.println("allWritten is not writeBytes: " + allWritten + ", " + writeBytes);
+      if (allRead != readBytes) System.out.println(scheme + ": allRead is not readBytes: " + allRead + ", " + readBytes);
+      if (allWritten != writeBytes) System.out.println(scheme + ": allWritten is not writeBytes: " + allWritten + ", " + writeBytes);
     }
   }
   
