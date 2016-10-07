@@ -58,7 +58,7 @@ public class RawLocalFileSystem extends FileSystem {
   static final URI NAME = URI.create("file:///");
   private Path workingDir;
   // Temporary workaround for HADOOP-9652.
-  private static boolean useDeprecatedFileStatus = true;
+  private static boolean useDeprecatedFileStatus = false;
 
   @VisibleForTesting
   public static void useStatIfAvailable() {
