@@ -17,8 +17,11 @@
  */
 package org.apache.hadoop.fs.swift.snative;
 
-import org.apache.commons.httpclient.Header;
-import org.apache.commons.httpclient.HttpStatus;
+import com.fasterxml.jackson.databind.type.CollectionType;
+
+import org.apache.http.Header;
+import org.apache.http.HttpStatus;
+import org.apache.http.message.BasicHeader;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
@@ -36,7 +39,6 @@ import org.apache.hadoop.fs.swift.util.DurationStats;
 import org.apache.hadoop.fs.swift.util.JSONUtil;
 import org.apache.hadoop.fs.swift.util.SwiftObjectPath;
 import org.apache.hadoop.fs.swift.util.SwiftUtils;
-import org.codehaus.jackson.map.type.CollectionType;
 
 import java.io.ByteArrayInputStream;
 import java.io.FileNotFoundException;
@@ -165,9 +167,9 @@ public class SwiftNativeFileSystemStore {
     }
 
     swiftRestClient.upload(toObjectPath(path),
-            new ByteArrayInputStream(new byte[0]),
-            0,
-            new Header(SwiftProtocolConstants.X_OBJECT_MANIFEST, pathString));
+        new ByteArrayInputStream(new byte[0]),
+        0,
+        new BasicHeader(SwiftProtocolConstants.X_OBJECT_MANIFEST, pathString));
   }
 
   /**

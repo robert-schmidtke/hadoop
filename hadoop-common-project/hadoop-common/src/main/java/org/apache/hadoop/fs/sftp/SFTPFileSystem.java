@@ -26,8 +26,6 @@ import java.net.URLDecoder;
 import java.util.ArrayList;
 import java.util.Vector;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FSDataOutputStream;
@@ -41,11 +39,14 @@ import com.jcraft.jsch.ChannelSftp;
 import com.jcraft.jsch.ChannelSftp.LsEntry;
 import com.jcraft.jsch.SftpATTRS;
 import com.jcraft.jsch.SftpException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /** SFTP FileSystem. */
 public class SFTPFileSystem extends FileSystem {
 
-  public static final Log LOG = LogFactory.getLog(SFTPFileSystem.class);
+  public static final Logger LOG =
+      LoggerFactory.getLogger(SFTPFileSystem.class);
 
   private SFTPConnectionPool connectionPool;
   private URI uri;
@@ -77,7 +78,6 @@ public class SFTPFileSystem extends FileSystem {
       "Can't make directory for path \"%s\" under \"%s\".";
   public static final String E_DIR_NOTEMPTY = "Directory: %s is not empty.";
   public static final String E_FILE_CHECK_FAILED = "File check failed";
-  public static final String E_NOT_SUPPORTED = "Not supported";
   public static final String E_SPATH_NOTEXIST = "Source path %s does not exist";
   public static final String E_DPATH_EXIST =
       "Destination path %s already exist, cannot rename!";
@@ -278,8 +278,8 @@ public class SFTPFileSystem extends FileSystem {
     // Using default block size since there is no way in SFTP channel to know of
     // block sizes on server. The assumption could be less than ideal.
     long blockSize = DEFAULT_BLOCK_SIZE;
-    long modTime = attr.getMTime() * 1000; // convert to milliseconds
-    long accessTime = 0;
+    long modTime = attr.getMTime() * 1000L; // convert to milliseconds
+    long accessTime = attr.getATime() * 1000L;
     FsPermission permission = getPermissions(sftpFile);
     // not be able to get the real user group name, just use the user and group
     // id
@@ -578,7 +578,8 @@ public class SFTPFileSystem extends FileSystem {
   public FSDataOutputStream append(Path f, int bufferSize,
       Progressable progress)
       throws IOException {
-    throw new IOException(E_NOT_SUPPORTED);
+    throw new UnsupportedOperationException("Append is not supported "
+        + "by SFTPFileSystem");
   }
 
   /*

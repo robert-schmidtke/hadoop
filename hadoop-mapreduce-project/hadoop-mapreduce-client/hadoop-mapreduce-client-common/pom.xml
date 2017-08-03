@@ -19,17 +19,18 @@
   <parent>
     <artifactId>hadoop-mapreduce-client</artifactId>
     <groupId>org.apache.hadoop</groupId>
-    <version>3.0.0-alpha2-SNAPSHOT</version>
+    <version>3.0.0-beta1-SNAPSHOT</version>
   </parent>
   <modelVersion>4.0.0</modelVersion>
-  <groupId>org.apache.hadoop</groupId>
   <artifactId>hadoop-mapreduce-client-common</artifactId>
-  <version>3.0.0-alpha2-SNAPSHOT</version>
+  <version>3.0.0-beta1-SNAPSHOT</version>
   <name>Apache Hadoop MapReduce Common</name>
 
   <properties>
     <!-- Needed for generating FindBugs warnings using parent pom -->
     <mr.basedir>${project.parent.basedir}/../</mr.basedir>
+    <should.run.jdiff>true</should.run.jdiff>
+    <dev-support.relative.dir>../../dev-support</dev-support.relative.dir>
   </properties>
 
   <dependencies>
@@ -59,7 +60,6 @@
         <executions>
           <execution>
             <id>compile-protoc</id>
-            <phase>generate-sources</phase>
             <goals>
               <goal>protoc</goal>
             </goals>
@@ -80,7 +80,6 @@
                   <include>MRClientProtocol.proto</include>
                 </includes>
               </source>
-              <output>${project.build.directory}/generated-sources/java</output>
             </configuration>
           </execution>
         </executions>

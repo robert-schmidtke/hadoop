@@ -30,6 +30,7 @@ import java.util.Map.Entry;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.ApplicationSubmissionContext;
+import org.apache.hadoop.yarn.api.records.ContainerLaunchContext;
 import org.apache.hadoop.yarn.api.records.ContainerStatus;
 import org.apache.hadoop.yarn.api.records.LogAggregationStatus;
 import org.apache.hadoop.yarn.api.records.NodeId;
@@ -412,6 +413,8 @@ public class TestRMAppLogAggregationStatus {
     Assert.assertEquals(LogAggregationStatus.TIME_OUT,
       rmApp.getLogAggregationStatusForAppReport());
 
+    rmApp = (RMAppImpl)createRMApp(conf);
+    rmApp.handle(new RMAppEvent(rmApp.getApplicationId(), RMAppEventType.KILL));
     // If the log aggregation status for all NMs are SUCCEEDED and Application
     // is at the final state, the log aggregation status for this app will
     // return SUCCEEDED
@@ -490,9 +493,10 @@ public class TestRMAppLogAggregationStatus {
 
   private RMApp createRMApp(Configuration conf) {
     ApplicationSubmissionContext submissionContext =
-        ApplicationSubmissionContext.newInstance(appId, "test", "default",
-          Priority.newInstance(0), null, false, true,
-          2, Resource.newInstance(10, 2), "test");
+        ApplicationSubmissionContext
+            .newInstance(appId, "test", "default", Priority.newInstance(0),
+                mock(ContainerLaunchContext.class), false, true, 2,
+                Resource.newInstance(10, 2), "test");
     return new RMAppImpl(this.appId, this.rmContext,
       conf, "test", "test", "default", submissionContext,
       scheduler,

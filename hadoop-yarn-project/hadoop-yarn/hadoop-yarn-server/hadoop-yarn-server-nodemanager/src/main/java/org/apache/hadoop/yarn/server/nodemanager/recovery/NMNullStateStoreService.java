@@ -70,7 +70,7 @@ public class NMNullStateStoreService extends NMStateStoreService {
   }
 
   @Override
-  public void storeContainer(ContainerId containerId,
+  public void storeContainer(ContainerId containerId, int version,
       StartContainerRequest startRequest) throws IOException {
   }
 
@@ -90,7 +90,7 @@ public class NMNullStateStoreService extends NMStateStoreService {
 
   @Override
   public void storeContainerResourceChanged(ContainerId containerId,
-      Resource capability) throws IOException {
+      int version, Resource capability) throws IOException {
   }
 
   @Override
@@ -226,6 +226,35 @@ public class NMNullStateStoreService extends NMStateStoreService {
 
   @Override
   public void removeLogDeleter(ApplicationId appId) throws IOException {
+  }
+
+  @Override
+  public RecoveredAMRMProxyState loadAMRMProxyState() throws IOException {
+    throw new UnsupportedOperationException(
+        "Recovery not supported by this state store");
+  }
+
+  @Override
+  public void storeAMRMProxyCurrentMasterKey(MasterKey key) throws IOException {
+  }
+
+  @Override
+  public void storeAMRMProxyNextMasterKey(MasterKey key) throws IOException {
+  }
+
+  @Override
+  public void storeAMRMProxyAppContextEntry(ApplicationAttemptId attempt,
+      String key, byte[] data) throws IOException {
+  }
+
+  @Override
+  public void removeAMRMProxyAppContextEntry(ApplicationAttemptId attempt,
+      String key) throws IOException {
+  }
+
+  @Override
+  public void removeAMRMProxyAppContext(ApplicationAttemptId attempt)
+      throws IOException {
   }
 
   @Override

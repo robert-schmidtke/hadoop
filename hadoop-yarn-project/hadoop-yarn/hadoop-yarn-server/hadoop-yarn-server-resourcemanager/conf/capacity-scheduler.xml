@@ -98,13 +98,40 @@
   </property>
 
   <property>
+    <name>yarn.scheduler.capacity.root.default.acl_application_max_priority</name>
+    <value>*</value>
+    <description>
+      The ACL of who can submit applications with configured priority.
+      For e.g, [user={name} group={name} max_priority={priority} default_priority={priority}]
+    </description>
+  </property>
+
+  <property>
     <name>yarn.scheduler.capacity.node-locality-delay</name>
     <value>40</value>
     <description>
       Number of missed scheduling opportunities after which the CapacityScheduler 
-      attempts to schedule rack-local containers. 
-      Typically this should be set to number of nodes in the cluster, By default is setting 
-      approximately number of nodes in one rack which is 40.
+      attempts to schedule rack-local containers.
+      When setting this parameter, the size of the cluster should be taken into account.
+      We use 40 as the default value, which is approximately the number of nodes in one rack.
+    </description>
+  </property>
+
+  <property>
+    <name>yarn.scheduler.capacity.rack-locality-additional-delay</name>
+    <value>-1</value>
+    <description>
+      Number of additional missed scheduling opportunities over the node-locality-delay
+      ones, after which the CapacityScheduler attempts to schedule off-switch containers,
+      instead of rack-local ones.
+      Example: with node-locality-delay=40 and rack-locality-delay=20, the scheduler will
+      attempt rack-local assignments after 40 missed opportunities, and off-switch assignments
+      after 40+20=60 missed opportunities.
+      When setting this parameter, the size of the cluster should be taken into account.
+      We use -1 as the default value, which disables this feature. In this case, the number
+      of missed opportunities for assigning off-switch containers is calculated based on
+      the number of containers and unique locations specified in the resource request,
+      as well as the size of the cluster.
     </description>
   </property>
 
@@ -128,6 +155,18 @@
       by the user? This can be used by administrators to place jobs in queues
       that are different than the one specified by the user.
       The default is false.
+    </description>
+  </property>
+
+  <property>
+    <name>yarn.scheduler.capacity.per-node-heartbeat.maximum-offswitch-assignments</name>
+    <value>1</value>
+    <description>
+      Controls the number of OFF_SWITCH assignments allowed
+      during a node's heartbeat. Increasing this value can improve
+      scheduling rate for OFF_SWITCH containers. Lower values reduce
+      "clumping" of applications on particular nodes. The default is 1.
+      Legal values are 1-MAX_INT. This config is refreshable.
     </description>
   </property>
 

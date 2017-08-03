@@ -28,10 +28,20 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.container.Container;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.linux.privileged.PrivilegedOperationExecutor;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.runtime.ContainerExecutionException;
+import org.apache.hadoop.yarn.server.nodemanager.containermanager.runtime.ContainerRuntime;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.runtime.ContainerRuntimeContext;
 
 import java.util.Map;
 
+/**
+ * This class is a {@link ContainerRuntime} implementation that delegates all
+ * operations to a {@link DefaultLinuxContainerRuntime} instance, a
+ * {@link DockerLinuxContainerRuntime} instance, or a
+ * {@link JavaSandboxLinuxContainerRuntime} instance depending on whether
+ * each instance believes the operation to be within its scope.
+ *
+ * @see DockerLinuxContainerRuntime#isDockerContainerRequested
+ */
 @InterfaceAudience.Private
 @InterfaceStability.Unstable
 public class DelegatingLinuxContainerRuntime implements LinuxContainerRuntime {
@@ -39,6 +49,7 @@ public class DelegatingLinuxContainerRuntime implements LinuxContainerRuntime {
       .getLog(DelegatingLinuxContainerRuntime.class);
   private DefaultLinuxContainerRuntime defaultLinuxContainerRuntime;
   private DockerLinuxContainerRuntime dockerLinuxContainerRuntime;
+  private JavaSandboxLinuxContainerRuntime javaSandboxLinuxContainerRuntime;
 
   @Override
   public void initialize(Configuration conf)
@@ -51,32 +62,40 @@ public class DelegatingLinuxContainerRuntime implements LinuxContainerRuntime {
     dockerLinuxContainerRuntime = new DockerLinuxContainerRuntime(
         privilegedOperationExecutor);
     dockerLinuxContainerRuntime.initialize(conf);
+    javaSandboxLinuxContainerRuntime = new JavaSandboxLinuxContainerRuntime(
+        privilegedOperationExecutor);
+    javaSandboxLinuxContainerRuntime.initialize(conf);
   }
 
-  private LinuxContainerRuntime pickContainerRuntime(Container container) {
-    Map<String, String> env = container.getLaunchContext().getEnvironment();
+  private LinuxContainerRuntime pickContainerRuntime(
+      Map<String, String> environment){
     LinuxContainerRuntime runtime;
-
-    if (DockerLinuxContainerRuntime.isDockerContainerRequested(env)){
+    //Sandbox checked first to ensure DockerRuntime doesn't circumvent controls
+    if (javaSandboxLinuxContainerRuntime.isSandboxContainerRequested()){
+        runtime = javaSandboxLinuxContainerRuntime;
+    } else if (DockerLinuxContainerRuntime
+        .isDockerContainerRequested(environment)){
       runtime = dockerLinuxContainerRuntime;
-    } else  {
+    } else {
       runtime = defaultLinuxContainerRuntime;
     }
 
-    if (LOG.isInfoEnabled()) {
-      LOG.info("Using container runtime: " + runtime.getClass()
+    if (LOG.isDebugEnabled()) {
+      LOG.debug("Using container runtime: " + runtime.getClass()
           .getSimpleName());
     }
 
     return runtime;
   }
 
+  private LinuxContainerRuntime pickContainerRuntime(Container container) {
+    return pickContainerRuntime(container.getLaunchContext().getEnvironment());
+  }
+
   @Override
   public void prepareContainer(ContainerRuntimeContext ctx)
       throws ContainerExecutionException {
-    Container container = ctx.getContainer();
-    LinuxContainerRuntime runtime = pickContainerRuntime(container);
-
+    LinuxContainerRuntime runtime = pickContainerRuntime(ctx.getContainer());
     runtime.prepareContainer(ctx);
   }
 
@@ -105,5 +124,11 @@ public class DelegatingLinuxContainerRuntime implements LinuxContainerRuntime {
     LinuxContainerRuntime runtime = pickContainerRuntime(container);
 
     runtime.reapContainer(ctx);
+  }
+
+  @Override
+  public String[] getIpAndHost(Container container) {
+    LinuxContainerRuntime runtime = pickContainerRuntime(container);
+    return runtime.getIpAndHost(container);
   }
 }

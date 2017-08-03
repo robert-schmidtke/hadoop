@@ -46,16 +46,20 @@ import com.google.common.annotations.VisibleForTesting;
 import org.apache.hadoop.HadoopIllegalArgumentException;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.fs.CreateFlag;
+import org.apache.hadoop.fs.StreamCapabilities;
 import org.apache.hadoop.hdfs.client.HdfsClientConfigKeys;
 import org.apache.hadoop.hdfs.protocol.ClientProtocol;
 import org.apache.hadoop.hdfs.protocol.DatanodeID;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
+import org.apache.hadoop.hdfs.protocol.DatanodeInfo.DatanodeInfoBuilder;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
 import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
 import org.apache.hadoop.hdfs.protocol.LocatedBlock;
 import org.apache.hadoop.hdfs.protocol.LocatedStripedBlock;
 import org.apache.hadoop.hdfs.protocol.datatransfer.BlockConstructionStage;
 import org.apache.hadoop.hdfs.util.StripedBlockUtil;
+import org.apache.hadoop.io.ByteBufferPool;
+import org.apache.hadoop.io.ElasticByteBufferPool;
 import org.apache.hadoop.io.MultipleIOException;
 import org.apache.hadoop.io.erasurecode.CodecUtil;
 import org.apache.hadoop.hdfs.protocol.ErasureCodingPolicy;
@@ -74,7 +78,10 @@ import org.apache.htrace.core.TraceScope;
  * Each stripe contains a sequence of cells.
  */
 @InterfaceAudience.Private
-public class DFSStripedOutputStream extends DFSOutputStream {
+public class DFSStripedOutputStream extends DFSOutputStream
+    implements StreamCapabilities {
+  private static final ByteBufferPool BUFFER_POOL = new ElasticByteBufferPool();
+
   static class MultipleBlockingQueue<T> {
     private final List<BlockingQueue<T>> queues;
 
@@ -208,7 +215,7 @@ public class DFSStripedOutputStream extends DFSOutputStream {
 
       buffers = new ByteBuffer[numAllBlocks];
       for (int i = 0; i < buffers.length; i++) {
-        buffers[i] = ByteBuffer.wrap(byteArrayManager.newByteArray(cellSize));
+        buffers[i] = BUFFER_POOL.getBuffer(useDirectBuffer(), cellSize);
       }
     }
 
@@ -236,7 +243,10 @@ public class DFSStripedOutputStream extends DFSOutputStream {
 
     private void release() {
       for (int i = 0; i < numAllBlocks; i++) {
-        byteArrayManager.release(buffers[i].array());
+        if (buffers[i] != null) {
+          BUFFER_POOL.putBuffer(buffers[i]);
+          buffers[i] = null;
+        }
       }
     }
 
@@ -309,6 +319,10 @@ public class DFSStripedOutputStream extends DFSOutputStream {
     }
     currentPackets = new DFSPacket[streamers.size()];
     setCurrentStreamer(0);
+  }
+
+  private boolean useDirectBuffer() {
+    return encoder.preferDirectBuffer();
   }
 
   StripedDataStreamer getStripedDataStreamer(int i) {
@@ -754,13 +768,42 @@ public class DFSStripedOutputStream extends DFSOutputStream {
         newNodes[i] = nodes[0];
         newStorageIDs[i] = storageIDs[0];
       } else {
-        newNodes[i] = new DatanodeInfo(DatanodeID.EMPTY_DATANODE_ID);
+        newNodes[i] = new DatanodeInfoBuilder()
+            .setNodeID(DatanodeID.EMPTY_DATANODE_ID).build();
         newStorageIDs[i] = "";
       }
     }
+
+    // should update the block group length based on the acked length
+    final long sentBytes = currentBlockGroup.getNumBytes();
+    final long ackedBytes = getNumAckedStripes() * cellSize * numDataBlocks;
+    Preconditions.checkState(ackedBytes <= sentBytes);
+    currentBlockGroup.setNumBytes(ackedBytes);
+    newBG.setNumBytes(ackedBytes);
     dfsClient.namenode.updatePipeline(dfsClient.clientName, currentBlockGroup,
         newBG, newNodes, newStorageIDs);
     currentBlockGroup = newBG;
+    currentBlockGroup.setNumBytes(sentBytes);
+  }
+
+  /**
+   * Get the number of acked stripes. An acked stripe means at least data block
+   * number size cells of the stripe were acked.
+   */
+  private long getNumAckedStripes() {
+    int minStripeNum = Integer.MAX_VALUE;
+    for (int i = 0; i < numAllBlocks; i++) {
+      final StripedDataStreamer streamer = getStripedDataStreamer(i);
+      if (streamer.isHealthy()) {
+        int curStripeNum = 0;
+        if (streamer.getBlock() != null) {
+          curStripeNum = (int) (streamer.getBlock().getNumBytes() / cellSize);
+        }
+        minStripeNum = Math.min(curStripeNum, minStripeNum);
+      }
+    }
+    assert minStripeNum != Integer.MAX_VALUE;
+    return minStripeNum;
   }
 
   private int stripeDataSize() {
@@ -768,13 +811,19 @@ public class DFSStripedOutputStream extends DFSOutputStream {
   }
 
   @Override
+  public boolean hasCapability(String capability) {
+    // StreamCapabilities like hsync / hflush are not supported yet.
+    return false;
+  }
+
+  @Override
   public void hflush() {
-    throw new UnsupportedOperationException();
+    // not supported yet
   }
 
   @Override
   public void hsync() {
-    throw new UnsupportedOperationException();
+    // not supported yet
   }
 
   @Override
@@ -786,6 +835,7 @@ public class DFSStripedOutputStream extends DFSOutputStream {
 
   @Override
   void abort() throws IOException {
+    final MultipleIOException.Builder b = new MultipleIOException.Builder();
     synchronized (this) {
       if (isClosed()) {
         return;
@@ -796,9 +846,19 @@ public class DFSStripedOutputStream extends DFSOutputStream {
                 + (dfsClient.getConf().getHdfsTimeout() / 1000)
                 + " seconds expired."));
       }
-      closeThreads(true);
+
+      try {
+        closeThreads(true);
+      } catch (IOException e) {
+        b.add(e);
+      }
     }
+
     dfsClient.endFileLease(fileId);
+    final IOException ioe = b.build();
+    if (ioe != null) {
+      throw ioe;
+    }
   }
 
   @Override
@@ -907,11 +967,20 @@ public class DFSStripedOutputStream extends DFSOutputStream {
     if (current.isHealthy()) {
       try {
         DataChecksum sum = getDataChecksum();
-        sum.calculateChunkedSums(buffer.array(), 0, len, checksumBuf, 0);
+        if (buffer.isDirect()) {
+          ByteBuffer directCheckSumBuf =
+              BUFFER_POOL.getBuffer(true, checksumBuf.length);
+          sum.calculateChunkedSums(buffer, directCheckSumBuf);
+          directCheckSumBuf.get(checksumBuf);
+          BUFFER_POOL.putBuffer(directCheckSumBuf);
+        } else {
+          sum.calculateChunkedSums(buffer.array(), 0, len, checksumBuf, 0);
+        }
+
         for (int i = 0; i < len; i += sum.getBytesPerChecksum()) {
           int chunkLen = Math.min(sum.getBytesPerChecksum(), len - i);
           int ckOffset = i / sum.getBytesPerChecksum() * getChecksumSize();
-          super.writeChunk(buffer.array(), i, chunkLen, checksumBuf, ckOffset,
+          super.writeChunk(buffer, chunkLen, checksumBuf, ckOffset,
               getChecksumSize());
         }
       } catch(Exception e) {
@@ -999,6 +1068,7 @@ public class DFSStripedOutputStream extends DFSOutputStream {
       setClosed();
       // shutdown executor of flushAll tasks
       flushAllExecutor.shutdownNow();
+      encoder.release();
     }
   }
 

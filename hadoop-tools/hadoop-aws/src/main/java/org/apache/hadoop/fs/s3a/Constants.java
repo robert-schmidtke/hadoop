@@ -35,6 +35,9 @@ public final class Constants {
   private Constants() {
   }
 
+  /** The minimum multipart size which S3 supports. */
+  public static final int MULTIPART_MIN_SIZE = 5 * 1024 * 1024;
+
   // s3 access key
   public static final String ACCESS_KEY = "fs.s3a.access.key";
 
@@ -45,6 +48,14 @@ public final class Constants {
   public static final String AWS_CREDENTIALS_PROVIDER =
       "fs.s3a.aws.credentials.provider";
 
+  /**
+   * Extra set of security credentials which will be prepended to that
+   * set in {@code "hadoop.security.credential.provider.path"}.
+   * This extra option allows for per-bucket overrides.
+   */
+  public static final String S3A_SECURITY_CREDENTIAL_PROVIDER_PATH =
+      "fs.s3a.security.credential.provider.path";
+
   // session token for when using TemporaryAWSCredentialsProvider
   public static final String SESSION_TOKEN = "fs.s3a.session.token";
 
@@ -53,7 +64,8 @@ public final class Constants {
   public static final int DEFAULT_MAXIMUM_CONNECTIONS = 15;
 
   // connect to s3 over ssl?
-  public static final String SECURE_CONNECTIONS = "fs.s3a.connection.ssl.enabled";
+  public static final String SECURE_CONNECTIONS =
+      "fs.s3a.connection.ssl.enabled";
   public static final boolean DEFAULT_SECURE_CONNECTIONS = true;
 
   //use a custom endpoint?
@@ -75,7 +87,8 @@ public final class Constants {
   public static final int DEFAULT_MAX_ERROR_RETRIES = 20;
 
   // seconds until we give up trying to establish a connection to s3
-  public static final String ESTABLISH_TIMEOUT = "fs.s3a.connection.establish.timeout";
+  public static final String ESTABLISH_TIMEOUT =
+      "fs.s3a.connection.establish.timeout";
   public static final int DEFAULT_ESTABLISH_TIMEOUT = 50000;
 
   // seconds until we give up on a connection to s3
@@ -111,46 +124,131 @@ public final class Constants {
   public static final long DEFAULT_MULTIPART_SIZE = 104857600; // 100 MB
 
   // minimum size in bytes before we start a multipart uploads or copy
-  public static final String MIN_MULTIPART_THRESHOLD = "fs.s3a.multipart.threshold";
+  public static final String MIN_MULTIPART_THRESHOLD =
+      "fs.s3a.multipart.threshold";
   public static final long DEFAULT_MIN_MULTIPART_THRESHOLD = Integer.MAX_VALUE;
 
   //enable multiobject-delete calls?
-  public static final String ENABLE_MULTI_DELETE = "fs.s3a.multiobjectdelete.enable";
+  public static final String ENABLE_MULTI_DELETE =
+      "fs.s3a.multiobjectdelete.enable";
 
   // comma separated list of directories
   public static final String BUFFER_DIR = "fs.s3a.buffer.dir";
 
-  // should we upload directly from memory rather than using a file buffer
+  // switch to the fast block-by-block upload mechanism
   public static final String FAST_UPLOAD = "fs.s3a.fast.upload";
   public static final boolean DEFAULT_FAST_UPLOAD = false;
 
   //initial size of memory buffer for a fast upload
+  @Deprecated
   public static final String FAST_BUFFER_SIZE = "fs.s3a.fast.buffer.size";
   public static final int DEFAULT_FAST_BUFFER_SIZE = 1048576; //1MB
 
-  // private | public-read | public-read-write | authenticated-read | 
-  // log-delivery-write | bucket-owner-read | bucket-owner-full-control
+  /**
+   * What buffer to use.
+   * Default is {@link #FAST_UPLOAD_BUFFER_DISK}
+   * Value: {@value}
+   */
+  @InterfaceStability.Unstable
+  public static final String FAST_UPLOAD_BUFFER =
+      "fs.s3a.fast.upload.buffer";
+
+  /**
+   * Buffer blocks to disk: {@value}.
+   * Capacity is limited to available disk space.
+   */
+
+  @InterfaceStability.Unstable
+  public static final String FAST_UPLOAD_BUFFER_DISK = "disk";
+
+  /**
+   * Use an in-memory array. Fast but will run of heap rapidly: {@value}.
+   */
+  @InterfaceStability.Unstable
+  public static final String FAST_UPLOAD_BUFFER_ARRAY = "array";
+
+  /**
+   * Use a byte buffer. May be more memory efficient than the
+   * {@link #FAST_UPLOAD_BUFFER_ARRAY}: {@value}.
+   */
+  @InterfaceStability.Unstable
+  public static final String FAST_UPLOAD_BYTEBUFFER = "bytebuffer";
+
+  /**
+   * Default buffer option: {@value}.
+   */
+  @InterfaceStability.Unstable
+  public static final String DEFAULT_FAST_UPLOAD_BUFFER =
+      FAST_UPLOAD_BUFFER_DISK;
+
+  /**
+   * Maximum Number of blocks a single output stream can have
+   * active (uploading, or queued to the central FileSystem
+   * instance's pool of queued operations.
+   * This stops a single stream overloading the shared thread pool.
+   * {@value}
+   * <p>
+   * Default is {@link #DEFAULT_FAST_UPLOAD_ACTIVE_BLOCKS}
+   */
+  @InterfaceStability.Unstable
+  public static final String FAST_UPLOAD_ACTIVE_BLOCKS =
+      "fs.s3a.fast.upload.active.blocks";
+
+  /**
+   * Limit of queued block upload operations before writes
+   * block. Value: {@value}
+   */
+  @InterfaceStability.Unstable
+  public static final int DEFAULT_FAST_UPLOAD_ACTIVE_BLOCKS = 4;
+
+  // Private | PublicRead | PublicReadWrite | AuthenticatedRead |
+  // LogDeliveryWrite | BucketOwnerRead | BucketOwnerFullControl
   public static final String CANNED_ACL = "fs.s3a.acl.default";
   public static final String DEFAULT_CANNED_ACL = "";
 
   // should we try to purge old multipart uploads when starting up
-  public static final String PURGE_EXISTING_MULTIPART = "fs.s3a.multipart.purge";
+  public static final String PURGE_EXISTING_MULTIPART =
+      "fs.s3a.multipart.purge";
   public static final boolean DEFAULT_PURGE_EXISTING_MULTIPART = false;
 
   // purge any multipart uploads older than this number of seconds
-  public static final String PURGE_EXISTING_MULTIPART_AGE = "fs.s3a.multipart.purge.age";
-  public static final long DEFAULT_PURGE_EXISTING_MULTIPART_AGE = 14400;
+  public static final String PURGE_EXISTING_MULTIPART_AGE =
+      "fs.s3a.multipart.purge.age";
+  public static final long DEFAULT_PURGE_EXISTING_MULTIPART_AGE = 86400;
 
-  // s3 server-side encryption
+  // s3 server-side encryption, see S3AEncryptionMethods for valid options
   public static final String SERVER_SIDE_ENCRYPTION_ALGORITHM =
       "fs.s3a.server-side-encryption-algorithm";
 
   /**
    * The standard encryption algorithm AWS supports.
    * Different implementations may support others (or none).
+   * Use the S3AEncryptionMethods instead when configuring
+   * which Server Side Encryption to use.
+   * Value: "{@value}".
    */
+  @Deprecated
   public static final String SERVER_SIDE_ENCRYPTION_AES256 =
       "AES256";
+
+  /**
+   * Used to specify which AWS KMS key to use if
+   * {@link #SERVER_SIDE_ENCRYPTION_ALGORITHM} is
+   * {@code SSE-KMS} (will default to aws/s3
+   * master key if left blank).
+   * With with {@code SSE_C}, the base-64 encoded AES 256 key.
+   * May be set within a JCEKS file.
+   * Value: "{@value}".
+   */
+  public static final String SERVER_SIDE_ENCRYPTION_KEY =
+      "fs.s3a.server-side-encryption.key";
+
+  /**
+   * The original key name. Never used in ASF releases,
+   * but did get into downstream products.
+   */
+  static final String OLD_S3A_SERVER_SIDE_ENCRYPTION_KEY
+      = "fs.s3a.server-side-encryption-key";
 
   //override signature algorithm used for signing requests
   public static final String SIGNING_ALGORITHM = "fs.s3a.signing-algorithm";
@@ -158,6 +256,12 @@ public final class Constants {
   public static final String S3N_FOLDER_SUFFIX = "_$folder$";
   public static final String FS_S3A_BLOCK_SIZE = "fs.s3a.block.size";
   public static final String FS_S3A = "s3a";
+
+  /** Prefix for all S3A properties: {@value}. */
+  public static final String FS_S3A_PREFIX = "fs.s3a.";
+
+  /** Prefix for S3A bucket-specific properties: {@value}. */
+  public static final String FS_S3A_BUCKET_PREFIX = "fs.s3a.bucket.";
 
   public static final int S3A_DEFAULT_PORT = -1;
 
@@ -198,4 +302,22 @@ public final class Constants {
    */
   @InterfaceStability.Unstable
   public static final String INPUT_FADV_RANDOM = "random";
+
+  @InterfaceAudience.Private
+  @InterfaceStability.Unstable
+  public static final String S3_CLIENT_FACTORY_IMPL =
+      "fs.s3a.s3.client.factory.impl";
+
+  @InterfaceAudience.Private
+  @InterfaceStability.Unstable
+  public static final Class<? extends S3ClientFactory>
+      DEFAULT_S3_CLIENT_FACTORY_IMPL =
+          S3ClientFactory.DefaultS3ClientFactory.class;
+
+  /**
+   * Maximum number of partitions in a multipart upload: {@value}.
+   */
+  @InterfaceAudience.Private
+  public static final int MAX_MULTIPART_COUNT = 10000;
+
 }

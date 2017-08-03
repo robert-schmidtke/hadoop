@@ -141,12 +141,8 @@ public final class HdfsConstants {
 
   // type of the datanode report
   public enum DatanodeReportType {
-    ALL, LIVE, DEAD, DECOMMISSIONING
+    ALL, LIVE, DEAD, DECOMMISSIONING, ENTERING_MAINTENANCE, IN_MAINTENANCE
   }
-
-  public static final byte RS_6_3_POLICY_ID = 0;
-  public static final byte RS_3_2_POLICY_ID = 1;
-  public static final byte RS_6_3_LEGACY_POLICY_ID = 2;
 
   /* Hidden constructor */
   protected HdfsConstants() {

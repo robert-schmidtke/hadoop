@@ -22,6 +22,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import java.util.Collection;
+import java.util.Collections;
 import java.util.EnumSet;
 import java.util.HashSet;
 import java.util.Map;
@@ -33,6 +34,7 @@ import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.ApplicationSubmissionContext;
 import org.apache.hadoop.yarn.api.records.Container;
 import org.apache.hadoop.yarn.api.records.ContainerId;
+import org.apache.hadoop.yarn.api.records.ContainerLaunchContext;
 import org.apache.hadoop.yarn.api.records.ContainerState;
 import org.apache.hadoop.yarn.api.records.FinalApplicationStatus;
 import org.apache.hadoop.yarn.api.records.NodeId;
@@ -118,7 +120,13 @@ public class TestSystemMetricsPublisher {
         when(asc.getUnmanagedAM()).thenReturn(false);
         when(asc.getPriority()).thenReturn(Priority.newInstance(1));
         when(asc.getNodeLabelExpression()).thenReturn("high-cpu");
+        ContainerLaunchContext containerLaunchContext =
+            mock(ContainerLaunchContext.class);
+        when(containerLaunchContext.getCommands())
+            .thenReturn(Collections.singletonList("java -Xmx1024m"));
+        when(asc.getAMContainerSpec()).thenReturn(containerLaunchContext);
         when(app.getApplicationSubmissionContext()).thenReturn(asc);
+        when(app.getApplicationPriority()).thenReturn(Priority.newInstance(1));
         metricsPublisher.appUpdated(app, 4L);
       } else {
         metricsPublisher.appUpdated(app, 4L);
@@ -197,6 +205,12 @@ public class TestSystemMetricsPublisher {
         Assert.assertEquals("uers1,user2",
             entity.getOtherInfo().get(
                 ApplicationMetricsConstants.APP_VIEW_ACLS_ENTITY_INFO));
+
+        Assert.assertEquals(
+            app.getApplicationSubmissionContext().getAMContainerSpec()
+                .getCommands(),
+            entity.getOtherInfo()
+                .get(ApplicationMetricsConstants.AM_CONTAINER_LAUNCH_COMMAND));
       } else {
         Assert.assertEquals(
             "",
@@ -210,6 +224,16 @@ public class TestSystemMetricsPublisher {
             app.getRMAppMetrics().getVcoreSeconds(),
             Long.parseLong(entity.getOtherInfo()
                 .get(ApplicationMetricsConstants.APP_CPU_METRICS).toString()));
+        Assert.assertEquals(
+            app.getRMAppMetrics().getPreemptedMemorySeconds(),
+            Long.parseLong(entity.getOtherInfo()
+                .get(ApplicationMetricsConstants.APP_MEM_PREEMPT_METRICS)
+                .toString()));
+        Assert.assertEquals(
+            app.getRMAppMetrics().getPreemptedVcoreSeconds(),
+            Long.parseLong(entity.getOtherInfo()
+                .get(ApplicationMetricsConstants.APP_CPU_PREEMPT_METRICS)
+                .toString()));
       }
       Assert.assertEquals("context", entity.getOtherInfo()
           .get(ApplicationMetricsConstants.YARN_APP_CALLER_CONTEXT));
@@ -328,34 +352,34 @@ public class TestSystemMetricsPublisher {
         hasRegisteredEvent = true;
         Assert.assertEquals(appAttempt.getHost(),
             event.getEventInfo()
-                .get(AppAttemptMetricsConstants.HOST_EVENT_INFO));
+                .get(AppAttemptMetricsConstants.HOST_INFO));
         Assert
             .assertEquals(appAttempt.getRpcPort(),
                 event.getEventInfo().get(
-                    AppAttemptMetricsConstants.RPC_PORT_EVENT_INFO));
+                    AppAttemptMetricsConstants.RPC_PORT_INFO));
         Assert.assertEquals(
             appAttempt.getMasterContainer().getId().toString(),
             event.getEventInfo().get(
-                AppAttemptMetricsConstants.MASTER_CONTAINER_EVENT_INFO));
+                AppAttemptMetricsConstants.MASTER_CONTAINER_INFO));
       } else if (event.getEventType().equals(
           AppAttemptMetricsConstants.FINISHED_EVENT_TYPE)) {
         hasFinishedEvent = true;
         Assert.assertEquals(appAttempt.getDiagnostics(), event.getEventInfo()
-            .get(AppAttemptMetricsConstants.DIAGNOSTICS_INFO_EVENT_INFO));
+            .get(AppAttemptMetricsConstants.DIAGNOSTICS_INFO));
         Assert.assertEquals(appAttempt.getTrackingUrl(), event.getEventInfo()
-            .get(AppAttemptMetricsConstants.TRACKING_URL_EVENT_INFO));
+            .get(AppAttemptMetricsConstants.TRACKING_URL_INFO));
         Assert.assertEquals(
             appAttempt.getOriginalTrackingUrl(),
             event.getEventInfo().get(
-                AppAttemptMetricsConstants.ORIGINAL_TRACKING_URL_EVENT_INFO));
+                AppAttemptMetricsConstants.ORIGINAL_TRACKING_URL_INFO));
         Assert.assertEquals(
             FinalApplicationStatus.UNDEFINED.toString(),
             event.getEventInfo().get(
-                AppAttemptMetricsConstants.FINAL_STATUS_EVENT_INFO));
+                AppAttemptMetricsConstants.FINAL_STATUS_INFO));
         Assert.assertEquals(
             YarnApplicationAttemptState.FINISHED.toString(),
             event.getEventInfo().get(
-                AppAttemptMetricsConstants.STATE_EVENT_INFO));
+                AppAttemptMetricsConstants.STATE_INFO));
       }
     }
     Assert.assertTrue(hasRegisteredEvent && hasFinishedEvent);
@@ -378,17 +402,17 @@ public class TestSystemMetricsPublisher {
     Assert.assertNotNull(entity.getOtherInfo());
     Assert.assertEquals(2, entity.getOtherInfo().size());
     Assert.assertNotNull(entity.getOtherInfo().get(
-        ContainerMetricsConstants.ALLOCATED_HOST_ENTITY_INFO));
+        ContainerMetricsConstants.ALLOCATED_HOST_INFO));
     Assert.assertNotNull(entity.getOtherInfo().get(
-        ContainerMetricsConstants.ALLOCATED_PORT_ENTITY_INFO));
+        ContainerMetricsConstants.ALLOCATED_PORT_INFO));
     Assert.assertEquals(
         container.getAllocatedNode().getHost(),
         entity.getOtherInfo().get(
-            ContainerMetricsConstants.ALLOCATED_HOST_ENTITY_INFO));
+            ContainerMetricsConstants.ALLOCATED_HOST_INFO));
     Assert.assertEquals(
         container.getAllocatedNode().getPort(),
         entity.getOtherInfo().get(
-            ContainerMetricsConstants.ALLOCATED_PORT_ENTITY_INFO));
+            ContainerMetricsConstants.ALLOCATED_PORT_INFO));
   }
 
   @Test(timeout = 10000)
@@ -419,25 +443,25 @@ public class TestSystemMetricsPublisher {
     Assert.assertEquals(
         container.getAllocatedNode().getHost(),
         entity.getOtherInfo().get(
-            ContainerMetricsConstants.ALLOCATED_HOST_ENTITY_INFO));
+            ContainerMetricsConstants.ALLOCATED_HOST_INFO));
     Assert.assertEquals(
         container.getAllocatedNode().getPort(),
         entity.getOtherInfo().get(
-            ContainerMetricsConstants.ALLOCATED_PORT_ENTITY_INFO));
+            ContainerMetricsConstants.ALLOCATED_PORT_INFO));
     Assert.assertEquals(container.getAllocatedResource().getMemorySize(),
         // KeyValueBasedTimelineStore could cast long to integer, need make sure
         // variables for compare have same type.
         ((Integer) entity.getOtherInfo().get(
-            ContainerMetricsConstants.ALLOCATED_MEMORY_ENTITY_INFO))
+            ContainerMetricsConstants.ALLOCATED_MEMORY_INFO))
             .longValue());
     Assert.assertEquals(
         container.getAllocatedResource().getVirtualCores(),
         entity.getOtherInfo().get(
-            ContainerMetricsConstants.ALLOCATED_VCORE_ENTITY_INFO));
+            ContainerMetricsConstants.ALLOCATED_VCORE_INFO));
     Assert.assertEquals(
         container.getAllocatedPriority().getPriority(),
         entity.getOtherInfo().get(
-            ContainerMetricsConstants.ALLOCATED_PRIORITY_ENTITY_INFO));
+            ContainerMetricsConstants.ALLOCATED_PRIORITY_INFO));
     boolean hasCreatedEvent = false;
     boolean hasFinishedEvent = false;
     for (TimelineEvent event : entity.getEvents()) {
@@ -452,13 +476,13 @@ public class TestSystemMetricsPublisher {
         Assert.assertEquals(
             container.getDiagnosticsInfo(),
             event.getEventInfo().get(
-                ContainerMetricsConstants.DIAGNOSTICS_INFO_EVENT_INFO));
+                ContainerMetricsConstants.DIAGNOSTICS_INFO));
         Assert.assertEquals(
             container.getContainerExitStatus(),
             event.getEventInfo().get(
-                ContainerMetricsConstants.EXIT_STATUS_EVENT_INFO));
+                ContainerMetricsConstants.EXIT_STATUS_INFO));
         Assert.assertEquals(container.getContainerState().toString(), event
-            .getEventInfo().get(ContainerMetricsConstants.STATE_EVENT_INFO));
+            .getEventInfo().get(ContainerMetricsConstants.STATE_INFO));
       }
     }
     Assert.assertTrue(hasCreatedEvent && hasFinishedEvent);
@@ -483,7 +507,8 @@ public class TestSystemMetricsPublisher {
     when(app.getFinalApplicationStatus()).thenReturn(
         FinalApplicationStatus.UNDEFINED);
     when(app.getRMAppMetrics()).thenReturn(
-        new RMAppMetrics(null, 0, 0, Integer.MAX_VALUE, Long.MAX_VALUE));
+        new RMAppMetrics(null, 0, 0, Integer.MAX_VALUE, Long.MAX_VALUE,
+            Integer.MAX_VALUE, Long.MAX_VALUE));
     Set<String> appTags = new HashSet<String>();
     appTags.add("test");
     appTags.add("tags");
@@ -492,12 +517,19 @@ public class TestSystemMetricsPublisher {
     when(asc.getUnmanagedAM()).thenReturn(false);
     when(asc.getPriority()).thenReturn(Priority.newInstance(10));
     when(asc.getNodeLabelExpression()).thenReturn("high-cpu");
+    ContainerLaunchContext containerLaunchContext =
+        mock(ContainerLaunchContext.class);
+    when(containerLaunchContext.getCommands())
+        .thenReturn(Collections.singletonList("java -Xmx1024m"));
+    when(asc.getAMContainerSpec()).thenReturn(containerLaunchContext);
     when(app.getApplicationSubmissionContext()).thenReturn(asc);
     when(app.getAppNodeLabelExpression()).thenCallRealMethod();
     ResourceRequest amReq = mock(ResourceRequest.class);
     when(amReq.getNodeLabelExpression()).thenReturn("high-mem");
-    when(app.getAMResourceRequest()).thenReturn(amReq);
+    when(app.getAMResourceRequests())
+        .thenReturn(Collections.singletonList(amReq));
     when(app.getAmNodeLabelExpression()).thenCallRealMethod();
+    when(app.getApplicationPriority()).thenReturn(Priority.newInstance(10));
     when(app.getCallerContext())
         .thenReturn(new CallerContext.Builder("context").build());
     return app;

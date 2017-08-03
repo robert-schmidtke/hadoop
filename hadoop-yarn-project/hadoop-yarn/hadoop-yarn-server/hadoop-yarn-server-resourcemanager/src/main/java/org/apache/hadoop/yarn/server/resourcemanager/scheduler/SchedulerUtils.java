@@ -18,13 +18,16 @@
 package org.apache.hadoop.yarn.server.resourcemanager.scheduler;
 
 import java.io.IOException;
-import java.util.List;
 import java.util.Set;
 
+import com.google.common.annotations.VisibleForTesting;
 import org.apache.commons.lang.StringUtils;
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.classification.InterfaceStability.Unstable;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.yarn.api.records.Container;
 import org.apache.hadoop.yarn.api.records.ContainerExitStatus;
 import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.hadoop.yarn.api.records.ContainerState;
@@ -41,7 +44,10 @@ import org.apache.hadoop.yarn.factory.providers.RecordFactoryProvider;
 import org.apache.hadoop.yarn.security.AccessType;
 import org.apache.hadoop.yarn.server.resourcemanager.RMContext;
 import org.apache.hadoop.yarn.server.resourcemanager.nodelabels.RMNodeLabelsManager;
+import org.apache.hadoop.yarn.server.resourcemanager.rmcontainer.RMContainer;
+import org.apache.hadoop.yarn.server.resourcemanager.rmcontainer.RMContainerImpl;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.SchedulingMode;
+import org.apache.hadoop.yarn.server.scheduler.SchedulerRequestKey;
 import org.apache.hadoop.yarn.util.resource.ResourceCalculator;
 import org.apache.hadoop.yarn.util.resource.Resources;
 
@@ -51,12 +57,17 @@ import org.apache.hadoop.yarn.util.resource.Resources;
 @Private
 @Unstable
 public class SchedulerUtils {
-  
+
+  private static final Log LOG = LogFactory.getLog(SchedulerUtils.class);
+
   private static final RecordFactory recordFactory = 
       RecordFactoryProvider.getRecordFactory(null);
 
   public static final String RELEASED_CONTAINER = 
       "Container released by application";
+
+  public static final String UPDATED_CONTAINER =
+      "Temporary container killed by application for ExeutionType update";
   
   public static final String LOST_CONTAINER = 
       "Container released on a *lost* node";
@@ -124,73 +135,36 @@ public class SchedulerUtils {
   }
 
   /**
-   * Utility method to normalize a list of resource requests, by insuring that
-   * the memory for each request is a multiple of minMemory and is not zero.
-   */
-  public static void normalizeRequests(
-    List<ResourceRequest> asks,
-    ResourceCalculator resourceCalculator,
-    Resource clusterResource,
-    Resource minimumResource,
-    Resource maximumResource) {
-    for (ResourceRequest ask : asks) {
-      normalizeRequest(
-        ask, resourceCalculator, clusterResource, minimumResource,
-        maximumResource, minimumResource);
-    }
-  }
-
-  /**
    * Utility method to normalize a resource request, by insuring that the
    * requested memory is a multiple of minMemory and is not zero.
    */
+  @VisibleForTesting
   public static void normalizeRequest(
     ResourceRequest ask,
     ResourceCalculator resourceCalculator,
-    Resource clusterResource,
     Resource minimumResource,
     Resource maximumResource) {
-    Resource normalized =
-      Resources.normalize(
-        resourceCalculator, ask.getCapability(), minimumResource,
-        maximumResource, minimumResource);
-    ask.setCapability(normalized);
-  }
-  
-  /**
-   * Utility method to normalize a list of resource requests, by insuring that
-   * the memory for each request is a multiple of minMemory and is not zero.
-   */
-  public static void normalizeRequests(
-      List<ResourceRequest> asks,
-      ResourceCalculator resourceCalculator, 
-      Resource clusterResource,
-      Resource minimumResource,
-      Resource maximumResource,
-      Resource incrementResource) {
-    for (ResourceRequest ask : asks) {
-      normalizeRequest(
-          ask, resourceCalculator, clusterResource, minimumResource,
-          maximumResource, incrementResource);
-    }
+    ask.setCapability(
+        getNormalizedResource(ask.getCapability(), resourceCalculator,
+            minimumResource, maximumResource, minimumResource));
   }
 
   /**
    * Utility method to normalize a resource request, by insuring that the
-   * requested memory is a multiple of minMemory and is not zero.
+   * requested memory is a multiple of increment resource and is not zero.
+   *
+   * @return normalized resource
    */
-  public static void normalizeRequest(
-      ResourceRequest ask, 
-      ResourceCalculator resourceCalculator, 
-      Resource clusterResource,
+  public static Resource getNormalizedResource(
+      Resource ask,
+      ResourceCalculator resourceCalculator,
       Resource minimumResource,
       Resource maximumResource,
       Resource incrementResource) {
-    Resource normalized = 
-        Resources.normalize(
-            resourceCalculator, ask.getCapability(), minimumResource,
-            maximumResource, incrementResource);
-    ask.setCapability(normalized);
+    Resource normalized = Resources.normalize(
+        resourceCalculator, ask, minimumResource,
+        maximumResource, incrementResource);
+    return normalized;
   }
 
   private static void normalizeNodeLabelExpressionInRequest(
@@ -230,9 +204,14 @@ public class SchedulerUtils {
       String labelExp = resReq.getNodeLabelExpression();
       if (!(RMNodeLabelsManager.NO_LABEL.equals(labelExp)
           || null == labelExp)) {
-        throw new InvalidLabelResourceRequestException(
-            "Invalid resource request, node label not enabled "
-                + "but request contains label expression");
+        String message = "NodeLabel is not enabled in cluster, but resource"
+            + " request contains a label expression.";
+        LOG.warn(message);
+        if (!isRecovery) {
+          throw new InvalidLabelResourceRequestException(
+              "Invalid resource request, node label not enabled "
+                  + "but request contains label expression");
+        }
       }
     }
     if (null == queueInfo) {
@@ -306,7 +285,7 @@ public class SchedulerUtils {
     // we don't allow specify label expression with more than one node labels now
     if (labelExp != null && labelExp.contains("&&")) {
       throw new InvalidLabelResourceRequestException(
-          "Invailid resource request, queue=" + queueInfo.getQueueName()
+          "Invalid resource request, queue=" + queueInfo.getQueueName()
               + " specified more than one node label "
               + "in a node label expression, node label expression = "
               + labelExp);
@@ -379,25 +358,7 @@ public class SchedulerUtils {
     }
     return null;
   }
-  
-  public static boolean checkResourceRequestMatchingNodePartition(
-      String requestedPartition, String nodePartition,
-      SchedulingMode schedulingMode) {
-    // We will only look at node label = nodeLabelToLookAt according to
-    // schedulingMode and partition of node.
-    String nodePartitionToLookAt = null;
-    if (schedulingMode == SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY) {
-      nodePartitionToLookAt = nodePartition;
-    } else {
-      nodePartitionToLookAt = RMNodeLabelsManager.NO_LABEL;
-    }
 
-    if (null == requestedPartition) {
-      requestedPartition = RMNodeLabelsManager.NO_LABEL;
-    }
-    return requestedPartition.equals(nodePartitionToLookAt);
-  }
-  
   private static boolean hasPendingResourceRequest(ResourceCalculator rc,
       ResourceUsage usage, String partitionToLookAt, Resource cluster) {
     if (Resources.greaterThan(rc, cluster,
@@ -416,5 +377,20 @@ public class SchedulerUtils {
       partitionToLookAt = RMNodeLabelsManager.NO_LABEL;
     }
     return hasPendingResourceRequest(rc, usage, partitionToLookAt, cluster);
+  }
+
+  public static RMContainer createOpportunisticRmContainer(RMContext rmContext,
+      Container container, boolean isRemotelyAllocated) {
+    SchedulerApplicationAttempt appAttempt =
+        ((AbstractYarnScheduler) rmContext.getScheduler())
+            .getCurrentAttemptForContainer(container.getId());
+    RMContainer rmContainer = new RMContainerImpl(container,
+        SchedulerRequestKey.extractFrom(container),
+        appAttempt.getApplicationAttemptId(), container.getNodeId(),
+        appAttempt.getUser(), rmContext, isRemotelyAllocated);
+    appAttempt.addRMContainer(container.getId(), rmContainer);
+    ((AbstractYarnScheduler) rmContext.getScheduler()).getNode(
+        container.getNodeId()).allocateContainer(rmContainer);
+    return rmContainer;
   }
 }

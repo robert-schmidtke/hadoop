@@ -15,6 +15,12 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+/* FreeBSD protects the getline() prototype. See getline(3) for more */
+#ifdef __FreeBSD__
+#define _WITH_GETLINE
+#endif
+
 #include <pwd.h>
 #include <stdio.h>
 #include <sys/types.h>
@@ -25,13 +31,14 @@ enum command {
   LAUNCH_CONTAINER = 1,
   SIGNAL_CONTAINER = 2,
   DELETE_AS_USER = 3,
-  LAUNCH_DOCKER_CONTAINER = 4
+  LAUNCH_DOCKER_CONTAINER = 4,
+  LIST_AS_USER = 5
 };
 
 enum errorcodes {
   INVALID_ARGUMENT_NUMBER = 1,
-  INVALID_USER_NAME, //2
-  INVALID_COMMAND_PROVIDED, //3
+  //INVALID_USER_NAME 2
+  INVALID_COMMAND_PROVIDED = 3,
   // SUPER_USER_NOT_ALLOWED_TO_RUN_TASKS (NOT USED) 4
   INVALID_NM_ROOT_DIRS = 5,
   SETUID_OPER_FAILED, //6
@@ -49,17 +56,25 @@ enum errorcodes {
   OUT_OF_MEMORY = 18,
   // INITIALIZE_DISTCACHEFILE_FAILED (NOT USED) 19
   INITIALIZE_USER_FAILED = 20,
-  UNABLE_TO_BUILD_PATH, //21
+  PATH_TO_DELETE_IS_NULL, //21
   INVALID_CONTAINER_EXEC_PERMISSIONS, //22
   // PREPARE_JOB_LOGS_FAILED (NOT USED) 23
-  INVALID_CONFIG_FILE =  24,
+  INVALID_CONFIG_FILE = 24,
   SETSID_OPER_FAILED = 25,
   WRITE_PIDFILE_FAILED = 26,
   WRITE_CGROUP_FAILED = 27,
   TRAFFIC_CONTROL_EXECUTION_FAILED = 28,
-  DOCKER_RUN_FAILED=29,
-  ERROR_OPENING_FILE = 30,
-  ERROR_READING_FILE = 31
+  DOCKER_RUN_FAILED = 29,
+  ERROR_OPENING_DOCKER_FILE = 30,
+  ERROR_READING_DOCKER_FILE = 31,
+  FEATURE_DISABLED = 32,
+  COULD_NOT_CREATE_SCRIPT_COPY = 33,
+  COULD_NOT_CREATE_CREDENTIALS_FILE = 34,
+  COULD_NOT_CREATE_WORK_DIRECTORIES = 35,
+  COULD_NOT_CREATE_APP_LOG_DIRECTORIES = 36,
+  COULD_NOT_CREATE_TMP_DIRECTORIES = 37,
+  ERROR_CREATE_CONTAINER_DIRECTORIES_ARGUMENTS = 38,
+  ERROR_SANITIZING_DOCKER_COMMAND = 39
 };
 
 enum operations {
@@ -73,7 +88,8 @@ enum operations {
   RUN_AS_USER_SIGNAL_CONTAINER = 8,
   RUN_AS_USER_DELETE = 9,
   RUN_AS_USER_LAUNCH_DOCKER_CONTAINER = 10,
-  RUN_DOCKER = 11
+  RUN_DOCKER = 11,
+  RUN_AS_USER_LIST = 12
 };
 
 #define NM_GROUP_KEY "yarn.nodemanager.linux-container-executor.group"
@@ -86,6 +102,8 @@ enum operations {
 #define BANNED_USERS_KEY "banned.users"
 #define ALLOWED_SYSTEM_USERS_KEY "allowed.system.users"
 #define DOCKER_BINARY_KEY "docker.binary"
+#define DOCKER_SUPPORT_ENABLED_KEY "feature.docker.enabled"
+#define TC_SUPPORT_ENABLED_KEY "feature.tc.enabled"
 #define TMP_DIR "tmp"
 
 extern struct passwd *user_detail;
@@ -96,7 +114,7 @@ extern FILE *LOGFILE;
 extern FILE *ERRORFILE;
 
 // get the executable's filename
-char* get_executable();
+char* get_executable(char *argv0);
 
 //function used to load the configurations present in the secure config
 void read_executor_config(const char* file_name);
@@ -177,11 +195,15 @@ int signal_container_as_user(const char *user, int pid, int sig);
 // delete a directory (or file) recursively as the user. The directory
 // could optionally be relative to the baseDir set of directories (if the same
 // directory appears on multiple disk volumes, the disk volumes should be passed
-// as the baseDirs). If baseDirs is not specified, then dir_to_be_deleted is 
+// as the baseDirs). If baseDirs is not specified, then dir_to_be_deleted is
 // assumed as the absolute path
 int delete_as_user(const char *user,
                    const char *dir_to_be_deleted,
                    char* const* baseDirs);
+
+// List the files in the given directory on stdout. The target_dir is always
+// assumed to be an absolute path.
+int list_as_user(const char *target_dir);
 
 // set the uid and gid of the node manager.  This is used when doing some
 // priviledged operations for setting the effective uid and gid.
@@ -249,6 +271,13 @@ int check_dir(const char* npath, mode_t st_mode, mode_t desired,
 int create_validate_dir(const char* npath, mode_t perm, const char* path,
    int finalComponent);
 
+/** Check if a feature is enabled in the specified configuration. */
+int is_feature_enabled(const char* feature_key, int default_value,
+                              struct configuration *cfg);
+
+/** Check if tc (traffic control) support is enabled in configuration. */
+int is_tc_support_enabled();
+
 /**
  * Run a batch of tc commands that modify interface configuration
  */
@@ -268,8 +297,15 @@ int traffic_control_read_state(char *command_file);
  */
 int traffic_control_read_stats(char *command_file);
 
+/** Check if docker support is enabled in configuration. */
+int is_docker_support_enabled();
 
 /**
  * Run a docker command passing the command file as an argument
  */
 int run_docker(const char *command_file);
+
+/**
+ * Sanitize docker commands. Returns NULL if there was any failure.
+*/
+char* sanitize_docker_command(const char *line);

@@ -33,7 +33,7 @@ import org.apache.hadoop.yarn.api.records.ContainerId;
 public class NMAuditLogger {
   private static final Log LOG = LogFactory.getLog(NMAuditLogger.class);
 
-  static enum Keys {USER, OPERATION, TARGET, RESULT, IP, 
+  enum Keys {USER, OPERATION, TARGET, RESULT, IP,
                     DESCRIPTION, APPID, CONTAINERID}
 
   public static class AuditConstants {
@@ -45,6 +45,10 @@ public class NMAuditLogger {
     // Some commonly used descriptions
     public static final String START_CONTAINER = "Start Container Request";
     public static final String STOP_CONTAINER = "Stop Container Request";
+    public static final String START_CONTAINER_REINIT =
+        "Container ReInitialization - Started";
+    public static final String FINISH_CONTAINER_REINIT =
+        "Container ReInitialization - Finished";
     public static final String FINISH_SUCCESS_CONTAINER = "Container Finished - Succeeded";
     public static final String FINISH_FAILED_CONTAINER = "Container Finished - Failed";
     public static final String FINISH_KILLED_CONTAINER = "Container Finished - Killed";

@@ -28,6 +28,7 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.EnumSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -37,6 +38,7 @@ import java.util.concurrent.locks.ReentrantReadWriteLock.WriteLock;
 
 import javax.crypto.SecretKey;
 
+import com.google.common.base.Preconditions;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
@@ -94,6 +96,7 @@ import org.apache.hadoop.yarn.server.resourcemanager.rmcontainer.RMContainerImpl
 import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNodeFinishedContainersPulledByAMEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.AbstractYarnScheduler;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.Allocation;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.ContainerUpdates;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerApplicationAttempt;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerApplicationAttempt.AMState;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerNode;
@@ -113,6 +116,12 @@ import com.google.common.annotations.VisibleForTesting;
 
 @SuppressWarnings({"unchecked", "rawtypes"})
 public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
+  private static final String STATE_CHANGE_MESSAGE =
+      "%s State change from %s to %s on event = %s";
+  private static final String RECOVERY_MESSAGE =
+      "Recovering attempt: %s with final state = %s";
+  private static final String DIAGNOSTIC_LIMIT_CONFIG_ERROR_MESSAGE =
+      "The value of %s should be a positive integer: %s";
 
   private static final Log LOG = LogFactory.getLog(RMAppAttemptImpl.class);
 
@@ -121,6 +130,7 @@ public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
 
   public final static Priority AM_CONTAINER_PRIORITY = recordFactory
       .newRecordInstance(Priority.class);
+
   static {
     AM_CONTAINER_PRIORITY.setPriority(0);
   }
@@ -133,6 +143,7 @@ public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
   private final EventHandler eventHandler;
   private final YarnScheduler scheduler;
   private final ApplicationMasterService masterService;
+  private final RMApp rmApp;
 
   private final ReadLock readLock;
   private final WriteLock writeLock;
@@ -144,14 +155,12 @@ public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
   private SecretKey clientTokenMasterKey = null;
 
   private ConcurrentMap<NodeId, List<ContainerStatus>>
-      justFinishedContainers =
-      new ConcurrentHashMap<NodeId, List<ContainerStatus>>();
+      justFinishedContainers = new ConcurrentHashMap<>();
   // Tracks the previous finished containers that are waiting to be
   // verified as received by the AM. If the AM sends the next allocate
   // request it implicitly acks this list.
   private ConcurrentMap<NodeId, List<ContainerStatus>>
-      finishedContainersSentToAM =
-      new ConcurrentHashMap<NodeId, List<ContainerStatus>>();
+      finishedContainersSentToAM = new ConcurrentHashMap<>();
   private volatile Container masterContainer;
 
   private float progress = 0;
@@ -167,16 +176,10 @@ public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
   // Set to null initially. Will eventually get set
   // if an RMAppAttemptUnregistrationEvent occurs
   private FinalApplicationStatus finalStatus = null;
-  private final StringBuilder diagnostics = new StringBuilder();
+  private final BoundedAppender diagnostics;
   private int amContainerExitStatus = ContainerExitStatus.INVALID;
 
   private Configuration conf;
-  // Since AM preemption, hardware error and NM resync are not counted towards
-  // AM failure count, even if this flag is true, a new attempt can still be
-  // re-created if this attempt is eventually failed because of preemption,
-  // hardware error or NM resync. So this flag indicates that this may be
-  // last attempt.
-  private final boolean maybeLastAttempt;
   private static final ExpiredTransition EXPIRED_TRANSITION =
       new ExpiredTransition();
   private static final AttemptFailedTransition FAILED_TRANSITION =
@@ -189,7 +192,7 @@ public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
   private Object transitionTodo;
   
   private RMAppAttemptMetrics attemptMetrics = null;
-  private ResourceRequest amReq = null;
+  private List<ResourceRequest> amReqs = null;
   private BlacklistManager blacklistedNodesForAM = null;
 
   private String amLaunchDiagnostics;
@@ -482,16 +485,16 @@ public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
       RMContext rmContext, YarnScheduler scheduler,
       ApplicationMasterService masterService,
       ApplicationSubmissionContext submissionContext,
-      Configuration conf, boolean maybeLastAttempt, ResourceRequest amReq) {
+      Configuration conf, List<ResourceRequest> amReqs, RMApp rmApp) {
     this(appAttemptId, rmContext, scheduler, masterService, submissionContext,
-        conf, maybeLastAttempt, amReq, new DisabledBlacklistManager());
+        conf, amReqs, rmApp, new DisabledBlacklistManager());
   }
 
   public RMAppAttemptImpl(ApplicationAttemptId appAttemptId,
       RMContext rmContext, YarnScheduler scheduler,
       ApplicationMasterService masterService,
       ApplicationSubmissionContext submissionContext,
-      Configuration conf, boolean maybeLastAttempt, ResourceRequest amReq,
+      Configuration conf, List<ResourceRequest> amReqs, RMApp rmApp,
       BlacklistManager amBlacklistManager) {
     this.conf = conf;
     this.applicationAttemptId = appAttemptId;
@@ -506,14 +509,53 @@ public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
     this.writeLock = lock.writeLock();
 
     this.proxiedTrackingUrl = generateProxyUriWithScheme();
-    this.maybeLastAttempt = maybeLastAttempt;
     this.stateMachine = stateMachineFactory.make(this);
 
     this.attemptMetrics =
         new RMAppAttemptMetrics(applicationAttemptId, rmContext);
 
-    this.amReq = amReq;
+    this.amReqs = amReqs;
     this.blacklistedNodesForAM = amBlacklistManager;
+
+    final int diagnosticsLimitKC = getDiagnosticsLimitKCOrThrow(conf);
+
+    if (LOG.isDebugEnabled()) {
+      LOG.debug(YarnConfiguration.APP_ATTEMPT_DIAGNOSTICS_LIMIT_KC + " : " +
+              diagnosticsLimitKC);
+    }
+
+    this.diagnostics = new BoundedAppender(diagnosticsLimitKC * 1024);
+    this.rmApp = rmApp;
+  }
+
+  private int getDiagnosticsLimitKCOrThrow(final Configuration configuration) {
+    try {
+      final int diagnosticsLimitKC = configuration.getInt(
+          YarnConfiguration.APP_ATTEMPT_DIAGNOSTICS_LIMIT_KC,
+          YarnConfiguration.DEFAULT_APP_ATTEMPT_DIAGNOSTICS_LIMIT_KC);
+
+      if (diagnosticsLimitKC <= 0) {
+        final String message =
+            String.format(DIAGNOSTIC_LIMIT_CONFIG_ERROR_MESSAGE,
+                YarnConfiguration.APP_ATTEMPT_DIAGNOSTICS_LIMIT_KC,
+                diagnosticsLimitKC);
+        LOG.error(message);
+
+        throw new YarnRuntimeException(message);
+      }
+
+      return diagnosticsLimitKC;
+    } catch (final NumberFormatException ignored) {
+      final String diagnosticsLimitKCString = configuration
+          .get(YarnConfiguration.APP_ATTEMPT_DIAGNOSTICS_LIMIT_KC);
+      final String message =
+          String.format(DIAGNOSTIC_LIMIT_CONFIG_ERROR_MESSAGE,
+              YarnConfiguration.APP_ATTEMPT_DIAGNOSTICS_LIMIT_KC,
+              diagnosticsLimitKCString);
+      LOG.error(message);
+
+      throw new YarnRuntimeException(message);
+    }
   }
 
   @Override
@@ -734,6 +776,11 @@ public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
     }
   }
 
+  @VisibleForTesting
+  void appendDiagnostics(final CharSequence message) {
+    this.diagnostics.append(message);
+  }
+
   public int getAMContainerExitStatus() {
     this.readLock.lock();
     try {
@@ -759,7 +806,7 @@ public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
   public List<ContainerStatus> getJustFinishedContainers() {
     this.readLock.lock();
     try {
-      List<ContainerStatus> returnList = new ArrayList<ContainerStatus>();
+      List<ContainerStatus> returnList = new ArrayList<>();
       for (Collection<ContainerStatus> containerStatusList :
           justFinishedContainers.values()) {
         returnList.addAll(containerStatusList);
@@ -798,7 +845,7 @@ public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
     this.writeLock.lock();
 
     try {
-      List<ContainerStatus> returnList = new ArrayList<ContainerStatus>();
+      List<ContainerStatus> returnList = new ArrayList<>();
 
       // A new allocate means the AM received the previously sent
       // finishedContainers. We can ack this to NM now
@@ -806,15 +853,17 @@ public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
 
       // Mark every containerStatus as being sent to AM though we may return
       // only the ones that belong to the current attempt
-      boolean keepContainersAcressAttempts = this.submissionContext
+      boolean keepContainersAcrossAppAttempts = this.submissionContext
           .getKeepContainersAcrossApplicationAttempts();
-      for (NodeId nodeId:justFinishedContainers.keySet()) {
+      for (Map.Entry<NodeId, List<ContainerStatus>> entry :
+          justFinishedContainers.entrySet()) {
+        NodeId nodeId = entry.getKey();
+        List<ContainerStatus> finishedContainers = entry.getValue();
+        if (finishedContainers.isEmpty()) {
+          continue;
+        }
 
-        // Clear and get current values
-        List<ContainerStatus> finishedContainers = justFinishedContainers.put
-            (nodeId, new ArrayList<ContainerStatus>());
-
-        if (keepContainersAcressAttempts) {
+        if (keepContainersAcrossAppAttempts) {
           returnList.addAll(finishedContainers);
         } else {
           // Filter out containers from previous attempt
@@ -826,12 +875,10 @@ public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
           }
         }
 
-        if (!finishedContainers.isEmpty()) {
-          finishedContainersSentToAM.putIfAbsent(nodeId,
-              new ArrayList<ContainerStatus>());
-          finishedContainersSentToAM.get(nodeId).addAll(finishedContainers);
-        }
+        finishedContainersSentToAM.putIfAbsent(nodeId, new ArrayList<>());
+        finishedContainersSentToAM.get(nodeId).addAll(finishedContainers);
       }
+      justFinishedContainers.clear();
 
       return returnList;
     } finally {
@@ -868,9 +915,16 @@ public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
         /* TODO fail the application on the failed transition */
       }
 
-      if (oldState != getAppAttemptState()) {
-        LOG.info(appAttemptID + " State change from " + oldState + " to "
-            + getAppAttemptState());
+      // Log at INFO if we're not recovering or not in a terminal state.
+      // Log at DEBUG otherwise.
+      if ((oldState != getAppAttemptState()) &&
+          ((recoveredFinalState == null) ||
+            (event.getType() != RMAppAttemptEventType.RECOVER))) {
+        LOG.info(String.format(STATE_CHANGE_MESSAGE, appAttemptID, oldState,
+            getAppAttemptState(), event.getType()));
+      } else if ((oldState != getAppAttemptState()) && LOG.isDebugEnabled()) {
+        LOG.debug(String.format(STATE_CHANGE_MESSAGE, appAttemptID, oldState,
+            getAppAttemptState(), event.getType()));
       }
     } finally {
       this.writeLock.unlock();
@@ -890,6 +944,10 @@ public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
           this.attemptMetrics.getAggregateAppResourceUsage();
       report.setMemorySeconds(resUsage.getMemorySeconds());
       report.setVcoreSeconds(resUsage.getVcoreSeconds());
+      report.setPreemptedMemorySeconds(
+          this.attemptMetrics.getPreemptedMemory());
+      report.setPreemptedVcoreSeconds(
+          this.attemptMetrics.getPreemptedVcore());
       return report;
     } finally {
       this.readLock.unlock();
@@ -903,10 +961,16 @@ public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
     ApplicationAttemptStateData attemptState =
         appState.getAttempt(getAppAttemptId());
     assert attemptState != null;
-    LOG.info("Recovering attempt: " + getAppAttemptId() + " with final state: "
-        + attemptState.getState());
-    diagnostics.append("Attempt recovered after RM restart");
-    diagnostics.append(attemptState.getDiagnostics());
+
+    if (attemptState.getState() == null) {
+      LOG.info(String.format(RECOVERY_MESSAGE, getAppAttemptId(), "NONE"));
+    } else if (LOG.isDebugEnabled()) {
+      LOG.debug(String.format(RECOVERY_MESSAGE, getAppAttemptId(),
+          attemptState.getState()));
+    }
+
+    this.diagnostics.append("Attempt recovered after RM restart");
+    this.diagnostics.append(attemptState.getDiagnostics());
     this.amContainerExitStatus = attemptState.getAMContainerExitStatus();
     if (amContainerExitStatus == ContainerExitStatus.PREEMPTED) {
       this.attemptMetrics.setIsPreempted();
@@ -921,7 +985,10 @@ public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
     this.startTime = attemptState.getStartTime();
     this.finishTime = attemptState.getFinishTime();
     this.attemptMetrics.updateAggregateAppResourceUsage(
-        attemptState.getMemorySeconds(),attemptState.getVcoreSeconds());
+        attemptState.getMemorySeconds(), attemptState.getVcoreSeconds());
+    this.attemptMetrics.updateAggregatePreemptedAppResourceUsage(
+        attemptState.getPreemptedMemorySeconds(),
+        attemptState.getPreemptedVcoreSeconds());
   }
 
   public void transferStateFromAttempt(RMAppAttempt attempt) {
@@ -933,11 +1000,12 @@ public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
     // if am crashed and not received this response, we should resend
     // this msg again after am restart
     if (!this.finishedContainersSentToAM.isEmpty()) {
-      for (NodeId nodeId : this.finishedContainersSentToAM.keySet()) {
+      for (Map.Entry<NodeId, List<ContainerStatus>> finishedContainer
+          : this.finishedContainersSentToAM.entrySet()) {
         List<ContainerStatus> containerStatuses =
-            this.finishedContainersSentToAM.get(nodeId);
-        this.justFinishedContainers.putIfAbsent(nodeId,
-            new ArrayList<ContainerStatus>());
+            finishedContainer.getValue();
+        NodeId nodeId = finishedContainer.getKey();
+        this.justFinishedContainers.putIfAbsent(nodeId, new ArrayList<>());
         this.justFinishedContainers.get(nodeId).addAll(containerStatuses);
       }
       this.finishedContainersSentToAM.clear();
@@ -1024,17 +1092,21 @@ public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
         // will be passed to scheduler, and scheduler will deduct the number after
         // AM container allocated
         
-        // Currently, following fields are all hard code,
+        // Currently, following fields are all hard coded,
         // TODO: change these fields when we want to support
-        // priority/resource-name/relax-locality specification for AM containers
-        // allocation.
-        appAttempt.amReq.setNumContainers(1);
-        appAttempt.amReq.setPriority(AM_CONTAINER_PRIORITY);
-        appAttempt.amReq.setResourceName(ResourceRequest.ANY);
-        appAttempt.amReq.setRelaxLocality(true);
+        // priority or multiple containers AM container allocation.
+        for (ResourceRequest amReq : appAttempt.amReqs) {
+          amReq.setNumContainers(1);
+          amReq.setPriority(AM_CONTAINER_PRIORITY);
+        }
 
-        appAttempt.getAMBlacklistManager().refreshNodeHostCount(
-            appAttempt.scheduler.getNumClusterNodes());
+        int numNodes =
+            RMServerUtils.getApplicableNodeCountForAM(appAttempt.rmContext,
+                appAttempt.conf, appAttempt.amReqs);
+        if (LOG.isDebugEnabled()) {
+          LOG.debug("Setting node count for blacklist to " + numNodes);
+        }
+        appAttempt.getAMBlacklistManager().refreshNodeHostCount(numNodes);
 
         ResourceBlacklistRequest amBlacklist =
             appAttempt.getAMBlacklistManager().getBlacklistUpdates();
@@ -1047,10 +1119,11 @@ public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
         Allocation amContainerAllocation =
             appAttempt.scheduler.allocate(
                 appAttempt.applicationAttemptId,
-                Collections.singletonList(appAttempt.amReq),
+                appAttempt.amReqs,
                 EMPTY_CONTAINER_RELEASE_LIST,
                 amBlacklist.getBlacklistAdditions(),
-                amBlacklist.getBlacklistRemovals(), null, null);
+                amBlacklist.getBlacklistRemovals(),
+                new ContainerUpdates());
         if (amContainerAllocation != null
             && amContainerAllocation.getContainers() != null) {
           assert (amContainerAllocation.getContainers().size() == 0);
@@ -1074,7 +1147,7 @@ public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
       Allocation amContainerAllocation =
           appAttempt.scheduler.allocate(appAttempt.applicationAttemptId,
             EMPTY_CONTAINER_REQUEST_LIST, EMPTY_CONTAINER_RELEASE_LIST, null,
-            null, null, null);
+            null, new ContainerUpdates());
       // There must be at least one container allocated, because a
       // CONTAINER_ALLOCATED is emitted after an RMContainer is constructed,
       // and is put in SchedulerApplication#newlyAllocatedContainers.
@@ -1132,6 +1205,8 @@ public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
     @Override
     public void transition(RMAppAttemptImpl appAttempt,
                                                     RMAppAttemptEvent event) {
+
+      appAttempt.registerClientToken();
       appAttempt.launchAttempt();
     }
   }
@@ -1142,8 +1217,7 @@ public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
     @Override
     public RMAppAttemptState transition(RMAppAttemptImpl appAttempt,
         RMAppAttemptEvent event) {
-      RMApp rmApp = appAttempt.rmContext.getRMApps().get(
-          appAttempt.getAppAttemptId().getApplicationId());
+      RMApp rmApp = appAttempt.rmApp;
 
       /*
        * If last attempt recovered final state is null .. it means attempt was
@@ -1222,7 +1296,6 @@ public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
     }
   }
 
-
   private void rememberTargetTransitions(RMAppAttemptEvent event,
       Object transitionToDo, RMAppAttemptState targetFinalState) {
     transitionTodo = transitionToDo;
@@ -1298,7 +1371,9 @@ public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
             startTime, stateToBeStored, finalTrackingUrl, diags,
             finalStatus, exitStatus,
           getFinishTime(), resUsage.getMemorySeconds(),
-          resUsage.getVcoreSeconds());
+          resUsage.getVcoreSeconds(),
+          this.attemptMetrics.getPreemptedMemory(),
+          this.attemptMetrics.getPreemptedVcore());
     LOG.info("Updating application attempt " + applicationAttemptId
         + " with final state: " + targetedFinalState + ", and exit status: "
         + exitStatus);
@@ -1388,14 +1463,9 @@ public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
           if (appAttempt.submissionContext
             .getKeepContainersAcrossApplicationAttempts()
               && !appAttempt.submissionContext.getUnmanagedAM()) {
-            // See if we should retain containers for non-unmanaged applications
-            if (!appAttempt.shouldCountTowardsMaxAttemptRetry()) {
-              // Premption, hardware failures, NM resync doesn't count towards
-              // app-failures and so we should retain containers.
-              keepContainersAcrossAppAttempts = true;
-            } else if (!appAttempt.maybeLastAttempt) {
-              // Not preemption, hardware failures or NM resync.
-              // Not last-attempt too - keep containers.
+            int numberOfFailure = ((RMAppImpl)appAttempt.rmApp)
+                .getNumFailedAppAttempts();
+            if (numberOfFailure < appAttempt.rmApp.getMaxAppAttempts()) {
               keepContainersAcrossAppAttempts = true;
             }
           }
@@ -1422,9 +1492,7 @@ public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
           .applicationAttemptFinished(appAttempt, finalAttemptState);
       appAttempt.rmContext.getSystemMetricsPublisher()
           .appAttemptFinished(appAttempt, finalAttemptState,
-              appAttempt.rmContext.getRMApps().get(
-                  appAttempt.applicationAttemptId.getApplicationId()),
-              System.currentTimeMillis());
+              appAttempt.rmApp, System.currentTimeMillis());
     }
   }
 
@@ -1459,18 +1527,19 @@ public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
       // Register with AMLivelinessMonitor
       appAttempt.attemptLaunched();
 
-      // register the ClientTokenMasterKey after it is saved in the store,
-      // otherwise client may hold an invalid ClientToken after RM restarts.
-      if (UserGroupInformation.isSecurityEnabled()) {
-        appAttempt.rmContext.getClientToAMTokenSecretManager()
-            .registerApplication(appAttempt.getAppAttemptId(),
-            appAttempt.getClientTokenMasterKey());
-      }
     }
   }
 
   @Override
   public boolean shouldCountTowardsMaxAttemptRetry() {
+    long attemptFailuresValidityInterval = this.submissionContext
+        .getAttemptFailuresValidityInterval();
+    long end = System.currentTimeMillis();
+    if (attemptFailuresValidityInterval > 0
+        && this.getFinishTime() > 0
+        && this.getFinishTime() < (end - attemptFailuresValidityInterval)) {
+        return false;
+    }
     try {
       this.readLock.lock();
       int exitStatus = getAMContainerExitStatus();
@@ -1524,9 +1593,18 @@ public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
       appAttempt.amrmToken =
           appAttempt.rmContext.getAMRMTokenSecretManager().createAndGetAMRMToken(
             appAttempt.applicationAttemptId);
-
+      appAttempt.registerClientToken();
       super.transition(appAttempt, event);
     }    
+  }
+
+  private void registerClientToken() {
+    // register the ClientTokenMasterKey after it is saved in the store,
+    // otherwise client may hold an invalid ClientToken after RM restarts.
+    if (UserGroupInformation.isSecurityEnabled()) {
+      rmContext.getClientToAMTokenSecretManager()
+          .registerApplication(getAppAttemptId(), getClientTokenMasterKey());
+    }
   }
 
   private static final class LaunchFailedTransition extends BaseFinalTransition {
@@ -1629,8 +1707,7 @@ public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
   private void setAMContainerCrashedDiagnosticsAndExitStatus(
       RMAppAttemptContainerFinishedEvent finishEvent) {
     ContainerStatus status = finishEvent.getContainerStatus();
-    String diagnostics = getAMContainerCrashedDiagnostics(finishEvent);
-    this.diagnostics.append(diagnostics);
+    this.diagnostics.append(getAMContainerCrashedDiagnostics(finishEvent));
     this.amContainerExitStatus = status.getExitStatus();
   }
 
@@ -1799,7 +1876,7 @@ public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
     progress = 1.0f;
     RMAppAttemptUnregistrationEvent unregisterEvent =
         (RMAppAttemptUnregistrationEvent) event;
-    diagnostics.append(unregisterEvent.getDiagnosticMsg());
+    this.diagnostics.append(unregisterEvent.getDiagnosticMsg());
     originalTrackingUrl = sanitizeTrackingUrl(unregisterEvent.getFinalTrackingUrl());
     finalStatus = unregisterEvent.getFinalApplicationStatus();
   }
@@ -1863,10 +1940,9 @@ public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
 
       // Clear and get current values
       List<ContainerStatus> currentSentContainers =
-          finishedContainersSentToAM.put(nodeId,
-            new ArrayList<ContainerStatus>());
+          finishedContainersSentToAM.put(nodeId, new ArrayList<>());
       List<ContainerId> containerIdList =
-          new ArrayList<ContainerId>(currentSentContainers.size());
+          new ArrayList<>(currentSentContainers.size());
       for (ContainerStatus containerStatus : currentSentContainers) {
         containerIdList.add(containerStatus.getContainerId());
       }
@@ -1897,7 +1973,7 @@ public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
     if (!appAttempt.getSubmissionContext()
         .getKeepContainersAcrossApplicationAttempts()) {
       appAttempt.finishedContainersSentToAM.putIfAbsent(nodeId,
-          new ArrayList<ContainerStatus>());
+          new ArrayList<>());
       appAttempt.finishedContainersSentToAM.get(nodeId).add(containerStatus);
       appAttempt.sendFinishedContainersToNM();
     } else {
@@ -1924,7 +2000,7 @@ public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
   private static void addJustFinishedContainer(RMAppAttemptImpl appAttempt,
       RMAppAttemptContainerFinishedEvent containerFinishedEvent) {
     appAttempt.justFinishedContainers.putIfAbsent(containerFinishedEvent
-        .getNodeId(), new ArrayList<ContainerStatus>());
+        .getNodeId(), new ArrayList<>());
     appAttempt.justFinishedContainers.get(containerFinishedEvent
             .getNodeId()).add(containerFinishedEvent.getContainerStatus());
   }
@@ -2150,11 +2226,6 @@ public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
     return attemptReport;
   }
 
-  // for testing
-  public boolean mayBeLastAttempt() {
-    return maybeLastAttempt;
-  }
-
   @Override
   public RMAppAttemptMetrics getRMAppAttemptMetrics() {
     // didn't use read/write lock here because RMAppAttemptMetrics has its own
@@ -2206,5 +2277,116 @@ public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
       }
     }
     return Collections.EMPTY_SET;
+  }
+
+  /**
+   * A {@link CharSequence} appender that considers its {@link #limit} as upper
+   * bound.
+   * <p>
+   * When {@link #limit} would be reached on append, past messages will be
+   * truncated from head, and a header telling the user about truncation will be
+   * prepended, with ellipses in between header and messages.
+   * <p>
+   * Note that header and ellipses are not counted against {@link #limit}.
+   * <p>
+   * An example:
+   *
+   * <pre>
+   * {@code
+   *   // At the beginning it's an empty string
+   *   final Appendable shortAppender = new BoundedAppender(80);
+   *   // The whole message fits into limit
+   *   shortAppender.append(
+   *       "message1 this is a very long message but fitting into limit\n");
+   *   // The first message is truncated, the second not
+   *   shortAppender.append("message2 this is shorter than the previous one\n");
+   *   // The first message is deleted, the second truncated, the third
+   *   // preserved
+   *   shortAppender.append("message3 this is even shorter message, maybe.\n");
+   *   // The first two are deleted, the third one truncated, the last preserved
+   *   shortAppender.append("message4 the shortest one, yet the greatest :)");
+   *   // Current contents are like this:
+   *   // Diagnostic messages truncated, showing last 80 chars out of 199:
+   *   // ...s is even shorter message, maybe.
+   *   // message4 the shortest one, yet the greatest :)
+   * }
+   * </pre>
+   * <p>
+   * Note that <tt>null</tt> values are {@link #append(CharSequence) append}ed
+   * just like in {@link StringBuilder#append(CharSequence) original
+   * implementation}.
+   * <p>
+   * Note that this class is not thread safe.
+   */
+  @VisibleForTesting
+  static class BoundedAppender {
+    @VisibleForTesting
+    static final String TRUNCATED_MESSAGES_TEMPLATE =
+        "Diagnostic messages truncated, showing last "
+            + "%d chars out of %d:%n...%s";
+
+    private final int limit;
+    private final StringBuilder messages = new StringBuilder();
+    private int totalCharacterCount = 0;
+
+    BoundedAppender(final int limit) {
+      Preconditions.checkArgument(limit > 0, "limit should be positive");
+
+      this.limit = limit;
+    }
+
+    /**
+     * Append a {@link CharSequence} considering {@link #limit}, truncating
+     * from the head of {@code csq} or {@link #messages} when necessary.
+     *
+     * @param csq the {@link CharSequence} to append
+     * @return this
+     */
+    BoundedAppender append(final CharSequence csq) {
+      appendAndCount(csq);
+      checkAndCut();
+
+      return this;
+    }
+
+    private void appendAndCount(final CharSequence csq) {
+      final int before = messages.length();
+      messages.append(csq);
+      final int after = messages.length();
+      totalCharacterCount += after - before;
+    }
+
+    private void checkAndCut() {
+      if (messages.length() > limit) {
+        final int newStart = messages.length() - limit;
+        messages.delete(0, newStart);
+      }
+    }
+
+    /**
+     * Get current length of messages considering truncates
+     * without header and ellipses.
+     *
+     * @return current length
+     */
+    int length() {
+      return messages.length();
+    }
+
+    /**
+     * Get a string representation of the actual contents, displaying also a
+     * header and ellipses when there was a truncate.
+     *
+     * @return String representation of the {@link #messages}
+     */
+    @Override
+    public String toString() {
+      if (messages.length() < totalCharacterCount) {
+        return String.format(TRUNCATED_MESSAGES_TEMPLATE, messages.length(),
+            totalCharacterCount, messages.toString());
+      }
+
+      return messages.toString();
+    }
   }
 }

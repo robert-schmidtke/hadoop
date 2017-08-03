@@ -56,7 +56,6 @@ import org.apache.hadoop.yarn.event.Dispatcher;
 import org.apache.hadoop.yarn.event.EventHandler;
 import org.apache.hadoop.yarn.exceptions.YarnRuntimeException;
 import org.apache.hadoop.yarn.factory.providers.RecordFactoryProvider;
-import org.apache.hadoop.yarn.security.ContainerTokenIdentifier;
 import org.apache.hadoop.yarn.server.api.protocolrecords.LogAggregationReport;
 import org.apache.hadoop.yarn.server.api.records.NodeHealthStatus;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.ContainerManager;
@@ -64,7 +63,6 @@ import org.apache.hadoop.yarn.server.nodemanager.collectormanager.NMCollectorSer
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.ContainerManagerImpl;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.application.Application;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.container.Container;
-import org.apache.hadoop.yarn.server.nodemanager.containermanager.queuing.QueuingContainerManagerImpl;
 import org.apache.hadoop.yarn.server.nodemanager.metrics.NodeManagerMetrics;
 import org.apache.hadoop.yarn.server.nodemanager.nodelabels.ConfigurationNodeLabelsProvider;
 import org.apache.hadoop.yarn.server.nodemanager.nodelabels.NodeLabelsProvider;
@@ -72,7 +70,7 @@ import org.apache.hadoop.yarn.server.nodemanager.nodelabels.ScriptBasedNodeLabel
 import org.apache.hadoop.yarn.server.nodemanager.recovery.NMLeveldbStateStoreService;
 import org.apache.hadoop.yarn.server.nodemanager.recovery.NMNullStateStoreService;
 import org.apache.hadoop.yarn.server.nodemanager.recovery.NMStateStoreService;
-import org.apache.hadoop.yarn.server.nodemanager.scheduler.OpportunisticContainerAllocator;
+import org.apache.hadoop.yarn.server.scheduler.OpportunisticContainerAllocator;
 import org.apache.hadoop.yarn.server.nodemanager.security.NMContainerTokenSecretManager;
 import org.apache.hadoop.yarn.server.nodemanager.security.NMTokenSecretManagerInNM;
 import org.apache.hadoop.yarn.server.nodemanager.timelineservice.NMTimelinePublisher;
@@ -83,6 +81,24 @@ import com.google.common.annotations.VisibleForTesting;
 
 public class NodeManager extends CompositeService 
     implements EventHandler<NodeManagerEvent> {
+
+  /**
+   * Node manager return status codes.
+   */
+  public enum NodeManagerStatus {
+    NO_ERROR(0),
+    EXCEPTION(1);
+
+    private int exitCode;
+
+    NodeManagerStatus(int exitCode) {
+      this.exitCode = exitCode;
+    }
+
+    public int getExitCode() {
+      return exitCode;
+    }
+  }
 
   /**
    * Priority of the NodeManager shutdown hook.
@@ -177,14 +193,8 @@ public class NodeManager extends CompositeService
       ContainerExecutor exec, DeletionService del,
       NodeStatusUpdater nodeStatusUpdater, ApplicationACLsManager aclsManager,
       LocalDirsHandlerService dirsHandler) {
-    if (getConfig().getBoolean(YarnConfiguration.NM_CONTAINER_QUEUING_ENABLED,
-        YarnConfiguration.NM_CONTAINER_QUEUING_ENABLED_DEFAULT)) {
-      return new QueuingContainerManagerImpl(context, exec, del,
-          nodeStatusUpdater, metrics, dirsHandler);
-    } else {
-      return new ContainerManagerImpl(context, exec, del, nodeStatusUpdater,
-          metrics, dirsHandler);
-    }
+    return new ContainerManagerImpl(context, exec, del, nodeStatusUpdater,
+        metrics, dirsHandler);
   }
 
   protected NMCollectorService createNMCollectorService(Context ctxt) {
@@ -289,9 +299,6 @@ public class NodeManager extends CompositeService
 
   @Override
   protected void serviceInit(Configuration conf) throws Exception {
-
-    conf.setBoolean(Dispatcher.DISPATCHER_EXIT_ON_ERROR_KEY, true);
-
     rmWorkPreservingRestartEnabled = conf.getBoolean(YarnConfiguration
             .RM_WORK_PRESERVING_RECOVERY_ENABLED,
         YarnConfiguration.DEFAULT_RM_WORK_PRESERVING_RECOVERY_ENABLED);
@@ -327,7 +334,7 @@ public class NodeManager extends CompositeService
     addService(del);
 
     // NodeManager level dispatcher
-    this.dispatcher = new AsyncDispatcher();
+    this.dispatcher = new AsyncDispatcher("NM Event dispatcher");
 
     dirsHandler = new LocalDirsHandlerService(metrics);
     nodeHealthChecker =
@@ -337,10 +344,13 @@ public class NodeManager extends CompositeService
 
     boolean isDistSchedulingEnabled =
         conf.getBoolean(YarnConfiguration.DIST_SCHEDULING_ENABLED,
-            YarnConfiguration.DIST_SCHEDULING_ENABLED_DEFAULT);
+            YarnConfiguration.DEFAULT_DIST_SCHEDULING_ENABLED);
 
     this.context = createNMContext(containerTokenSecretManager,
         nmTokenSecretManager, nmStore, isDistSchedulingEnabled, conf);
+
+
+    ((NMContext)context).setContainerExecutor(exec);
 
     nodeLabelsProvider = createNodeLabelsProvider(conf);
 
@@ -370,8 +380,8 @@ public class NodeManager extends CompositeService
     ((NMContext) context).setWebServer(webServer);
 
     ((NMContext) context).setQueueableContainerAllocator(
-        new OpportunisticContainerAllocator(nodeStatusUpdater, context,
-            webServer.getPort()));
+        new OpportunisticContainerAllocator(
+            context.getContainerTokenSecretManager()));
 
     dispatcher.register(ContainerManagerEventType.class, containerManager);
     dispatcher.register(NodeManagerEventType.class, this);
@@ -426,7 +436,7 @@ public class NodeManager extends CompositeService
     return "NodeManager";
   }
 
-  protected void shutDown() {
+  protected void shutDown(final int exitCode) {
     new Thread() {
       @Override
       public void run() {
@@ -437,7 +447,7 @@ public class NodeManager extends CompositeService
         } finally {
           if (shouldExitOnShutdownEvent
               && !ShutdownHookManager.get().isShutdownInProgress()) {
-            ExitUtil.terminate(-1);
+            ExitUtil.terminate(exitCode);
           }
         }
       }
@@ -450,8 +460,6 @@ public class NodeManager extends CompositeService
       @Override
       public void run() {
         try {
-          LOG.info("Notifying ContainerManager to block new container-requests");
-          containerManager.setBlockNewContainerRequests(true);
           if (!rmWorkPreservingRestartEnabled) {
             LOG.info("Cleaning up running containers on resync");
             containerManager.cleanupContainersOnNMResync();
@@ -462,7 +470,7 @@ public class NodeManager extends CompositeService
             .rebootNodeStatusUpdaterAndRegisterWithRM();
         } catch (YarnRuntimeException e) {
           LOG.fatal("Error while rebooting NodeStatusUpdater.", e);
-          shutDown();
+          shutDown(NodeManagerStatus.EXCEPTION.getExitCode());
         }
       }
     }.start();
@@ -507,7 +515,7 @@ public class NodeManager extends CompositeService
 
     private OpportunisticContainerAllocator containerAllocator;
 
-    private final QueuingContext queuingContext;
+    private ContainerExecutor executor;
 
     private NMTimelinePublisher nmTimelinePublisher;
 
@@ -529,7 +537,6 @@ public class NodeManager extends CompositeService
       this.stateStore = stateStore;
       this.logAggregationReportForApps = new ConcurrentLinkedQueue<
           LogAggregationReport>();
-      this.queuingContext = new QueuingNMContext();
       this.isDistSchedulingEnabled = isDistSchedulingEnabled;
       this.conf = conf;
     }
@@ -658,11 +665,6 @@ public class NodeManager extends CompositeService
       this.nodeStatusUpdater = nodeStatusUpdater;
     }
 
-    @Override
-    public QueuingContext getQueuingContext() {
-      return this.queuingContext;
-    }
-
     public boolean isDistributedSchedulingEnabled() {
       return isDistSchedulingEnabled;
     }
@@ -701,28 +703,13 @@ public class NodeManager extends CompositeService
     public NMTimelinePublisher getNMTimelinePublisher() {
       return nmTimelinePublisher;
     }
-  }
 
-  /**
-   * Class that keeps the context for containers queued at the NM.
-   */
-  public static class QueuingNMContext implements Context.QueuingContext {
-    protected final ConcurrentMap<ContainerId, ContainerTokenIdentifier>
-        queuedContainers = new ConcurrentSkipListMap<>();
-
-    protected final ConcurrentMap<ContainerTokenIdentifier, String>
-        killedQueuedContainers = new ConcurrentHashMap<>();
-
-    @Override
-    public ConcurrentMap<ContainerId, ContainerTokenIdentifier>
-        getQueuedContainers() {
-      return this.queuedContainers;
+    public ContainerExecutor getContainerExecutor() {
+      return this.executor;
     }
 
-    @Override
-    public ConcurrentMap<ContainerTokenIdentifier, String>
-        getKilledQueuedContainers() {
-      return this.killedQueuedContainers;
+    public void setContainerExecutor(ContainerExecutor executor) {
+      this.executor = executor;
     }
   }
 
@@ -738,7 +725,7 @@ public class NodeManager extends CompositeService
       // Failed to start if we're a Unix based system but we don't have bash.
       // Bash is necessary to launch containers under Unix-based systems.
       if (!Shell.WINDOWS) {
-        if (!Shell.isBashSupported) {
+        if (!Shell.checkIsBashSupported()) {
           String message =
               "Failing NodeManager start since we're on a "
                   + "Unix-based system but bash doesn't seem to be available.";
@@ -770,7 +757,7 @@ public class NodeManager extends CompositeService
   public void handle(NodeManagerEvent event) {
     switch (event.getType()) {
     case SHUTDOWN:
-      shutDown();
+      shutDown(NodeManagerStatus.NO_ERROR.getExitCode());
       break;
     case RESYNC:
       resyncWithRM();

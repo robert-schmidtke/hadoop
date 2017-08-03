@@ -32,8 +32,6 @@ import java.util.NoSuchElementException;
 import java.util.StringTokenizer;
 import java.util.concurrent.ConcurrentHashMap;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.HadoopIllegalArgumentException;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
@@ -52,6 +50,8 @@ import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.util.Progressable;
 
 import com.google.common.annotations.VisibleForTesting;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * This class provides an interface for implementors of a Hadoop file system
@@ -66,7 +66,7 @@ import com.google.common.annotations.VisibleForTesting;
 @InterfaceAudience.Public
 @InterfaceStability.Stable
 public abstract class AbstractFileSystem {
-  static final Log LOG = LogFactory.getLog(AbstractFileSystem.class);
+  static final Logger LOG = LoggerFactory.getLogger(AbstractFileSystem.class);
 
   /** Recording statistics per a file system class. */
   private static final Map<URI, Statistics> 
@@ -450,8 +450,20 @@ public abstract class AbstractFileSystem {
    * @return server default configuration values
    * 
    * @throws IOException an I/O error occurred
+   * @deprecated use {@link #getServerDefaults(Path)} instead
    */
+  @Deprecated
   public abstract FsServerDefaults getServerDefaults() throws IOException; 
+
+  /**
+   * Return a set of server default configuration values based on path.
+   * @param f path to fetch server defaults
+   * @return server default configuration values for path
+   * @throws IOException an I/O error occurred
+   */
+  public FsServerDefaults getServerDefaults(final Path f) throws IOException {
+    return getServerDefaults();
+  }
 
   /**
    * Return the fully-qualified path of path f resolving the path
@@ -548,7 +560,7 @@ public abstract class AbstractFileSystem {
     }
 
 
-    FsServerDefaults ssDef = getServerDefaults();
+    FsServerDefaults ssDef = getServerDefaults(f);
     if (ssDef.getBlockSize() % ssDef.getBytesPerChecksum() != 0) {
       throw new IOException("Internal error: default blockSize is" + 
           " not a multiple of default bytesPerChecksum ");
@@ -626,7 +638,7 @@ public abstract class AbstractFileSystem {
    */
   public FSDataInputStream open(final Path f) throws AccessControlException,
       FileNotFoundException, UnresolvedLinkException, IOException {
-    return open(f, getServerDefaults().getFileBufferSize());
+    return open(f, getServerDefaults(f).getFileBufferSize());
   }
 
   /**

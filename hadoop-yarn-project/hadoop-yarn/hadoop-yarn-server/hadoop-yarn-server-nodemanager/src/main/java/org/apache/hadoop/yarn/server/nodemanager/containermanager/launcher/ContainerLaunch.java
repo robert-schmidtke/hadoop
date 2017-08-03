@@ -58,6 +58,7 @@ import org.apache.hadoop.yarn.api.records.ContainerLaunchContext;
 import org.apache.hadoop.yarn.api.records.SignalContainerCommand;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.event.Dispatcher;
+import org.apache.hadoop.yarn.exceptions.ConfigurationException;
 import org.apache.hadoop.yarn.exceptions.YarnException;
 import org.apache.hadoop.yarn.ipc.RPCUtil;
 import org.apache.hadoop.yarn.server.nodemanager.ContainerExecutor;
@@ -77,6 +78,7 @@ import org.apache.hadoop.yarn.server.nodemanager.containermanager.container.Cont
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.container.ContainerState;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.localizer.ContainerLocalizer;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.localizer.ResourceLocalizationService;
+import org.apache.hadoop.yarn.server.nodemanager.executor.ContainerPrepareContext;
 import org.apache.hadoop.yarn.server.nodemanager.executor.ContainerSignalContext;
 import org.apache.hadoop.yarn.server.nodemanager.executor.ContainerStartContext;
 import org.apache.hadoop.yarn.server.nodemanager.util.ProcessIdFileReader;
@@ -104,9 +106,10 @@ public class ContainerLaunch implements Callable<Integer> {
   private final Context context;
   private final ContainerManagerImpl containerManager;
   
-  protected AtomicBoolean shouldLaunchContainer = new AtomicBoolean(false);
+  protected AtomicBoolean containerAlreadyLaunched = new AtomicBoolean(false);
   protected AtomicBoolean completed = new AtomicBoolean(false);
 
+  private volatile boolean killedBeforeStart = false;
   private long sleepDelayBeforeSigKill = 250;
   private long maxKillWaitTime = 2000;
 
@@ -197,33 +200,23 @@ public class ContainerLaunch implements Callable<Integer> {
 
       FileContext lfs = FileContext.getLocalFSFileContext();
 
-      Path nmPrivateContainerScriptPath =
-          dirsHandler.getLocalPathForWrite(
-              getContainerPrivateDir(appIdStr, containerIdStr) + Path.SEPARATOR
-                  + CONTAINER_SCRIPT);
-      Path nmPrivateTokensPath =
-          dirsHandler.getLocalPathForWrite(
-              getContainerPrivateDir(appIdStr, containerIdStr)
-                  + Path.SEPARATOR
-                  + String.format(ContainerLocalizer.TOKEN_FILE_NAME_FMT,
-                      containerIdStr));
-      Path nmPrivateClasspathJarDir = 
-          dirsHandler.getLocalPathForWrite(
-              getContainerPrivateDir(appIdStr, containerIdStr));
+      Path nmPrivateContainerScriptPath = dirsHandler.getLocalPathForWrite(
+          getContainerPrivateDir(appIdStr, containerIdStr) + Path.SEPARATOR
+              + CONTAINER_SCRIPT);
+      Path nmPrivateTokensPath = dirsHandler.getLocalPathForWrite(
+          getContainerPrivateDir(appIdStr, containerIdStr) + Path.SEPARATOR
+              + String.format(ContainerLocalizer.TOKEN_FILE_NAME_FMT,
+              containerIdStr));
+      Path nmPrivateClasspathJarDir = dirsHandler.getLocalPathForWrite(
+          getContainerPrivateDir(appIdStr, containerIdStr));
       DataOutputStream containerScriptOutStream = null;
       DataOutputStream tokensOutStream = null;
 
       // Select the working directory for the container
-      Path containerWorkDir =
-          dirsHandler.getLocalPathForWrite(ContainerLocalizer.USERCACHE
-              + Path.SEPARATOR + user + Path.SEPARATOR
-              + ContainerLocalizer.APPCACHE + Path.SEPARATOR + appIdStr
-              + Path.SEPARATOR + containerIdStr,
-              LocalDirAllocator.SIZE_UNKNOWN, false);
+      Path containerWorkDir = deriveContainerWorkDir();
       recordContainerWorkDir(containerID, containerWorkDir.toString());
 
       String pidFileSubpath = getPidFileSubpath(appIdStr, containerIdStr);
-
       // pid file should be in nm private dir so that it is not 
       // accessible by users
       pidFilePath = dirsHandler.getLocalPathForWrite(pidFileSubpath);
@@ -239,11 +232,9 @@ public class ContainerLaunch implements Callable<Integer> {
         throw new IOException("Most of the disks failed. "
             + dirsHandler.getDisksHealthReport(false));
       }
-
       try {
         // /////////// Write out the container-script in the nmPrivate space.
         List<Path> appDirs = new ArrayList<Path>(localDirs.size());
-
         for (String localDir : localDirs) {
           Path usersdir = new Path(localDir, ContainerLocalizer.USERCACHE);
           Path userdir = new Path(usersdir, user);
@@ -251,24 +242,24 @@ public class ContainerLaunch implements Callable<Integer> {
           appDirs.add(new Path(appsdir, appIdStr));
         }
         containerScriptOutStream =
-          lfs.create(nmPrivateContainerScriptPath,
-              EnumSet.of(CREATE, OVERWRITE));
+            lfs.create(nmPrivateContainerScriptPath,
+                EnumSet.of(CREATE, OVERWRITE));
 
         // Set the token location too.
         environment.put(
-            ApplicationConstants.CONTAINER_TOKEN_FILE_ENV_NAME, 
-            new Path(containerWorkDir, 
+            ApplicationConstants.CONTAINER_TOKEN_FILE_ENV_NAME,
+            new Path(containerWorkDir,
                 FINAL_CONTAINER_TOKENS_FILE).toUri().getPath());
         // Sanitize the container's environment
         sanitizeEnv(environment, containerWorkDir, appDirs, userLocalDirs,
-            containerLogDirs,
-          localResources, nmPrivateClasspathJarDir);
+            containerLogDirs, localResources, nmPrivateClasspathJarDir);
+
+        prepareContainer(localResources, containerLocalDirs);
 
         // Write out the environment
         exec.writeLaunchEnv(containerScriptOutStream, environment,
-          localResources, launchContext.getCommands(),
-            new Path(containerLogDirs.get(0)));
-
+            localResources, launchContext.getCommands(),
+            new Path(containerLogDirs.get(0)), user);
         // /////////// End of writing out container-script
 
         // /////////// Write out the container-tokens in the nmPrivate space.
@@ -294,8 +285,15 @@ public class ContainerLaunch implements Callable<Integer> {
           .setFilecacheDirs(filecacheDirs)
           .setUserLocalDirs(userLocalDirs)
           .setContainerLocalDirs(containerLocalDirs)
-          .setContainerLogDirs(containerLogDirs)
-          .build());
+          .setContainerLogDirs(containerLogDirs).build());
+    } catch (ConfigurationException e) {
+      LOG.error("Failed to launch container due to configuration error.", e);
+      dispatcher.getEventHandler().handle(new ContainerExitEvent(
+          containerID, ContainerEventType.CONTAINER_EXITED_WITH_FAILURE, ret,
+          e.getMessage()));
+      // Mark the node as unhealthy
+      context.getNodeStatusUpdater().reportException(e);
+      return ret;
     } catch (Throwable e) {
       LOG.warn("Failed to launch container.", e);
       dispatcher.getEventHandler().handle(new ContainerExitEvent(
@@ -307,8 +305,40 @@ public class ContainerLaunch implements Callable<Integer> {
     }
 
     handleContainerExitCode(ret, containerLogDir);
-
     return ret;
+  }
+
+  private Path deriveContainerWorkDir() throws IOException {
+
+    final String containerWorkDirPath =
+        ContainerLocalizer.USERCACHE +
+        Path.SEPARATOR +
+        container.getUser() +
+        Path.SEPARATOR +
+        ContainerLocalizer.APPCACHE +
+        Path.SEPARATOR +
+        app.getAppId().toString() +
+        Path.SEPARATOR +
+        container.getContainerId().toString();
+
+    final Path containerWorkDir =
+        dirsHandler.getLocalPathForWrite(
+          containerWorkDirPath,
+          LocalDirAllocator.SIZE_UNKNOWN, false);
+
+    return containerWorkDir;
+  }
+
+  private void prepareContainer(Map<Path, List<String>> localResources,
+      List<String> containerLocalDirs) throws IOException {
+
+    exec.prepareContainer(new ContainerPrepareContext.Builder()
+        .setContainer(container)
+        .setLocalizedResources(localResources)
+        .setUser(container.getUser())
+        .setContainerLocalDirs(containerLocalDirs)
+        .setCommands(container.getLaunchContext().getCommands())
+        .build());
   }
 
   @SuppressWarnings("unchecked")
@@ -399,9 +429,15 @@ public class ContainerLaunch implements Callable<Integer> {
   }
 
   @SuppressWarnings("unchecked")
-  protected int launchContainer(ContainerStartContext ctx) throws IOException {
+  protected int launchContainer(ContainerStartContext ctx)
+      throws IOException, ConfigurationException {
     ContainerId containerId = container.getContainerId();
-
+    if (container.isMarkedForKilling()) {
+      LOG.info("Container " + containerId + " not launched as it has already "
+          + "been marked for Killing");
+      this.killedBeforeStart = true;
+      return ExitCode.TERMINATED.getExitCode();
+    }
     // LaunchContainer is a blocking call. We are here almost means the
     // container is launched, so send out the event.
     dispatcher.getEventHandler().handle(new ContainerEvent(
@@ -410,7 +446,7 @@ public class ContainerLaunch implements Callable<Integer> {
     context.getNMStateStore().storeContainerLaunched(containerId);
 
     // Check if the container is signalled to be killed.
-    if (!shouldLaunchContainer.compareAndSet(false, true)) {
+    if (!containerAlreadyLaunched.compareAndSet(false, true)) {
       LOG.info("Container " + containerId + " not launched as "
           + "cleanup already called");
       return ExitCode.TERMINATED.getExitCode();
@@ -451,10 +487,14 @@ public class ContainerLaunch implements Callable<Integer> {
         || exitCode == ExitCode.TERMINATED.getExitCode()) {
       // If the process was killed, Send container_cleanedup_after_kill and
       // just break out of this method.
-      dispatcher.getEventHandler().handle(
-          new ContainerExitEvent(containerId,
-              ContainerEventType.CONTAINER_KILLED_ON_REQUEST, exitCode,
-              diagnosticInfo.toString()));
+
+      // If Container was killed before starting... NO need to do this.
+      if (!killedBeforeStart) {
+        dispatcher.getEventHandler().handle(
+            new ContainerExitEvent(containerId,
+                ContainerEventType.CONTAINER_KILLED_ON_REQUEST, exitCode,
+                diagnosticInfo.toString()));
+      }
     } else if (exitCode != 0) {
       handleContainerExitWithFailure(containerId, exitCode, containerLogDir,
           diagnosticInfo);
@@ -565,14 +605,16 @@ public class ContainerLaunch implements Callable<Integer> {
     }
 
     // launch flag will be set to true if process already launched
-    boolean alreadyLaunched = !shouldLaunchContainer.compareAndSet(false, true);
+    boolean alreadyLaunched =
+        !containerAlreadyLaunched.compareAndSet(false, true);
     if (!alreadyLaunched) {
       LOG.info("Container " + containerIdStr + " not launched."
           + " No cleanup needed to be done");
       return;
     }
-
-    LOG.debug("Marking container " + containerIdStr + " as inactive");
+    if (LOG.isDebugEnabled()) {
+      LOG.debug("Marking container " + containerIdStr + " as inactive");
+    }
     // this should ensure that if the container process has not launched 
     // by this time, it will never be launched
     exec.deactivateContainer(containerId);
@@ -596,10 +638,10 @@ public class ContainerLaunch implements Callable<Integer> {
       // kill process
       if (processId != null) {
         String user = container.getUser();
-        LOG.debug("Sending signal to pid " + processId
-            + " as user " + user
-            + " for container " + containerIdStr);
-
+        if (LOG.isDebugEnabled()) {
+          LOG.debug("Sending signal to pid " + processId + " as user " + user
+              + " for container " + containerIdStr);
+        }
         final Signal signal = sleepDelayBeforeSigKill > 0
           ? Signal.TERM
           : Signal.KILL;
@@ -611,12 +653,11 @@ public class ContainerLaunch implements Callable<Integer> {
                 .setPid(processId)
                 .setSignal(signal)
                 .build());
-
-        LOG.debug("Sent signal " + signal + " to pid " + processId
-          + " as user " + user
-          + " for container " + containerIdStr
-          + ", result=" + (result? "success" : "failed"));
-
+        if (LOG.isDebugEnabled()) {
+          LOG.debug("Sent signal " + signal + " to pid " + processId
+              + " as user " + user + " for container " + containerIdStr
+              + ", result=" + (result ? "success" : "failed"));
+        }
         if (sleepDelayBeforeSigKill > 0) {
           new DelayedProcessKiller(container, user,
               processId, sleepDelayBeforeSigKill, Signal.KILL, exec).start();
@@ -660,7 +701,8 @@ public class ContainerLaunch implements Callable<Integer> {
 
     LOG.info("Sending signal " + command + " to container " + containerIdStr);
 
-    boolean alreadyLaunched = !shouldLaunchContainer.compareAndSet(false, true);
+    boolean alreadyLaunched =
+        !containerAlreadyLaunched.compareAndSet(false, true);
     if (!alreadyLaunched) {
       LOG.info("Container " + containerIdStr + " not launched."
           + " Not sending the signal");
@@ -744,8 +786,10 @@ public class ContainerLaunch implements Callable<Integer> {
     String containerIdStr = 
         container.getContainerId().toString();
     String processId = null;
-    LOG.debug("Accessing pid for container " + containerIdStr
-        + " from pid file " + pidFilePath);
+    if (LOG.isDebugEnabled()) {
+      LOG.debug("Accessing pid for container " + containerIdStr
+          + " from pid file " + pidFilePath);
+    }
     int sleepCounter = 0;
     final int sleepInterval = 100;
 
@@ -754,8 +798,10 @@ public class ContainerLaunch implements Callable<Integer> {
     while (true) {
       processId = ProcessIdFileReader.getProcessId(pidFilePath);
       if (processId != null) {
-        LOG.debug("Got pid " + processId + " for container "
-            + containerIdStr);
+        if (LOG.isDebugEnabled()) {
+          LOG.debug(
+              "Got pid " + processId + " for container " + containerIdStr);
+        }
         break;
       }
       else if ((sleepCounter*sleepInterval) > maxKillWaitTime) {
@@ -1094,98 +1140,9 @@ public class ContainerLaunch implements Callable<Integer> {
     // TODO: Remove Windows check and use this approach on all platforms after
     // additional testing.  See YARN-358.
     if (Shell.WINDOWS) {
-      
-      String inputClassPath = environment.get(Environment.CLASSPATH.name());
 
-      if (inputClassPath != null && !inputClassPath.isEmpty()) {
-
-        //On non-windows, localized resources
-        //from distcache are available via the classpath as they were placed
-        //there but on windows they are not available when the classpath
-        //jar is created and so they "are lost" and have to be explicitly
-        //added to the classpath instead.  This also means that their position
-        //is lost relative to other non-distcache classpath entries which will
-        //break things like mapreduce.job.user.classpath.first.  An environment
-        //variable can be set to indicate that distcache entries should come
-        //first
-
-        boolean preferLocalizedJars = Boolean.parseBoolean(
-          environment.get(Environment.CLASSPATH_PREPEND_DISTCACHE.name())
-          );
-
-        boolean needsSeparator = false;
-        StringBuilder newClassPath = new StringBuilder();
-        if (!preferLocalizedJars) {
-          newClassPath.append(inputClassPath);
-          needsSeparator = true;
-        }
-
-        // Localized resources do not exist at the desired paths yet, because the
-        // container launch script has not run to create symlinks yet.  This
-        // means that FileUtil.createJarWithClassPath can't automatically expand
-        // wildcards to separate classpath entries for each file in the manifest.
-        // To resolve this, append classpath entries explicitly for each
-        // resource.
-        for (Map.Entry<Path,List<String>> entry : resources.entrySet()) {
-          boolean targetIsDirectory = new File(entry.getKey().toUri().getPath())
-            .isDirectory();
-
-          for (String linkName : entry.getValue()) {
-            // Append resource.
-            if (needsSeparator) {
-              newClassPath.append(File.pathSeparator);
-            } else {
-              needsSeparator = true;
-            }
-            newClassPath.append(pwd.toString())
-              .append(Path.SEPARATOR).append(linkName);
-
-            // FileUtil.createJarWithClassPath must use File.toURI to convert
-            // each file to a URI to write into the manifest's classpath.  For
-            // directories, the classpath must have a trailing '/', but
-            // File.toURI only appends the trailing '/' if it is a directory that
-            // already exists.  To resolve this, add the classpath entries with
-            // explicit trailing '/' here for any localized resource that targets
-            // a directory.  Then, FileUtil.createJarWithClassPath will guarantee
-            // that the resulting entry in the manifest's classpath will have a
-            // trailing '/', and thus refer to a directory instead of a file.
-            if (targetIsDirectory) {
-              newClassPath.append(Path.SEPARATOR);
-            }
-          }
-        }
-        if (preferLocalizedJars) {
-          if (needsSeparator) {
-            newClassPath.append(File.pathSeparator);
-          }
-          newClassPath.append(inputClassPath);
-        }
-
-        // When the container launches, it takes the parent process's environment
-        // and then adds/overwrites with the entries from the container launch
-        // context.  Do the same thing here for correct substitution of
-        // environment variables in the classpath jar manifest.
-        Map<String, String> mergedEnv = new HashMap<String, String>(
-          System.getenv());
-        mergedEnv.putAll(environment);
-        
-        // this is hacky and temporary - it's to preserve the windows secure
-        // behavior but enable non-secure windows to properly build the class
-        // path for access to job.jar/lib/xyz and friends (see YARN-2803)
-        Path jarDir;
-        if (exec instanceof WindowsSecureContainerExecutor) {
-          jarDir = nmPrivateClasspathJarDir;
-        } else {
-          jarDir = pwd; 
-        }
-        String[] jarCp = FileUtil.createJarWithClassPath(
-          newClassPath.toString(), jarDir, pwd, mergedEnv);
-        // In a secure cluster the classpath jar must be localized to grant access
-        Path localizedClassPathJar = exec.localizeClasspathJar(
-            new Path(jarCp[0]), pwd, container.getUser());
-        String replacementClassPath = localizedClassPathJar.toString() + jarCp[1];
-        environment.put(Environment.CLASSPATH.name(), replacementClassPath);
-      }
+      sanitizeWindowsEnv(environment, pwd,
+          resources, nmPrivateClasspathJarDir);
     }
     // put AuxiliaryService data to environment
     for (Map.Entry<String, ByteBuffer> meta : containerManager
@@ -1195,22 +1152,119 @@ public class ContainerLaunch implements Callable<Integer> {
     }
   }
 
+  private void sanitizeWindowsEnv(Map<String, String> environment, Path pwd,
+      Map<Path, List<String>> resources, Path nmPrivateClasspathJarDir)
+      throws IOException {
+
+    String inputClassPath = environment.get(Environment.CLASSPATH.name());
+
+    if (inputClassPath != null && !inputClassPath.isEmpty()) {
+
+      //On non-windows, localized resources
+      //from distcache are available via the classpath as they were placed
+      //there but on windows they are not available when the classpath
+      //jar is created and so they "are lost" and have to be explicitly
+      //added to the classpath instead.  This also means that their position
+      //is lost relative to other non-distcache classpath entries which will
+      //break things like mapreduce.job.user.classpath.first.  An environment
+      //variable can be set to indicate that distcache entries should come
+      //first
+
+      boolean preferLocalizedJars = Boolean.parseBoolean(
+              environment.get(Environment.CLASSPATH_PREPEND_DISTCACHE.name())
+      );
+
+      boolean needsSeparator = false;
+      StringBuilder newClassPath = new StringBuilder();
+      if (!preferLocalizedJars) {
+        newClassPath.append(inputClassPath);
+        needsSeparator = true;
+      }
+
+      // Localized resources do not exist at the desired paths yet, because the
+      // container launch script has not run to create symlinks yet.  This
+      // means that FileUtil.createJarWithClassPath can't automatically expand
+      // wildcards to separate classpath entries for each file in the manifest.
+      // To resolve this, append classpath entries explicitly for each
+      // resource.
+      for (Map.Entry<Path, List<String>> entry : resources.entrySet()) {
+        boolean targetIsDirectory = new File(entry.getKey().toUri().getPath())
+                .isDirectory();
+
+        for (String linkName : entry.getValue()) {
+          // Append resource.
+          if (needsSeparator) {
+            newClassPath.append(File.pathSeparator);
+          } else {
+            needsSeparator = true;
+          }
+          newClassPath.append(pwd.toString())
+                  .append(Path.SEPARATOR).append(linkName);
+
+          // FileUtil.createJarWithClassPath must use File.toURI to convert
+          // each file to a URI to write into the manifest's classpath.  For
+          // directories, the classpath must have a trailing '/', but
+          // File.toURI only appends the trailing '/' if it is a directory that
+          // already exists.  To resolve this, add the classpath entries with
+          // explicit trailing '/' here for any localized resource that targets
+          // a directory.  Then, FileUtil.createJarWithClassPath will guarantee
+          // that the resulting entry in the manifest's classpath will have a
+          // trailing '/', and thus refer to a directory instead of a file.
+          if (targetIsDirectory) {
+            newClassPath.append(Path.SEPARATOR);
+          }
+        }
+      }
+      if (preferLocalizedJars) {
+        if (needsSeparator) {
+          newClassPath.append(File.pathSeparator);
+        }
+        newClassPath.append(inputClassPath);
+      }
+
+      // When the container launches, it takes the parent process's environment
+      // and then adds/overwrites with the entries from the container launch
+      // context.  Do the same thing here for correct substitution of
+      // environment variables in the classpath jar manifest.
+      Map<String, String> mergedEnv = new HashMap<String, String>(
+              System.getenv());
+      mergedEnv.putAll(environment);
+
+      // this is hacky and temporary - it's to preserve the windows secure
+      // behavior but enable non-secure windows to properly build the class
+      // path for access to job.jar/lib/xyz and friends (see YARN-2803)
+      Path jarDir;
+      if (exec instanceof WindowsSecureContainerExecutor) {
+        jarDir = nmPrivateClasspathJarDir;
+      } else {
+        jarDir = pwd;
+      }
+      String[] jarCp = FileUtil.createJarWithClassPath(
+              newClassPath.toString(), jarDir, pwd, mergedEnv);
+      // In a secure cluster the classpath jar must be localized to grant access
+      Path localizedClassPathJar = exec.localizeClasspathJar(
+              new Path(jarCp[0]), pwd, container.getUser());
+      String replacementClassPath = localizedClassPathJar.toString() + jarCp[1];
+      environment.put(Environment.CLASSPATH.name(), replacementClassPath);
+    }
+  }
+
   public static String getExitCodeFile(String pidFile) {
     return pidFile + EXIT_CODE_FILE_SUFFIX;
   }
 
   private void recordContainerLogDir(ContainerId containerId,
       String logDir) throws IOException{
+    container.setLogDir(logDir);
     if (container.isRetryContextSet()) {
-      container.setLogDir(logDir);
       context.getNMStateStore().storeContainerLogDir(containerId, logDir);
     }
   }
 
   private void recordContainerWorkDir(ContainerId containerId,
       String workDir) throws IOException{
+    container.setWorkDir(workDir);
     if (container.isRetryContextSet()) {
-      container.setWorkDir(workDir);
       context.getNMStateStore().storeContainerWorkDir(containerId, workDir);
     }
   }

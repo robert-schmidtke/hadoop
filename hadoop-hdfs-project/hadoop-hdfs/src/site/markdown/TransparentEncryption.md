@@ -15,30 +15,7 @@
 Transparent Encryption in HDFS
 ==============================
 
-* [Overview](#Overview)
-* [Background](#Background)
-* [Use Cases](#Use_Cases)
-* [Architecture](#Architecture)
-    * [Overview](#Architecture_overview)
-    * [Accessing data within an encryption zone](#Accessing_data_within_an_encryption_zone)
-    * [Key Management Server, KeyProvider, EDEKs](#Key_Management_Server_KeyProvider_EDEKs)
-* [Configuration](#Configuration)
-    * [Configuring the cluster KeyProvider](#Configuring_the_cluster_KeyProvider)
-    * [Selecting an encryption algorithm and codec](#Selecting_an_encryption_algorithm_and_codec)
-    * [Namenode configuration](#Namenode_configuration)
-* [crypto command-line interface](#crypto_command-line_interface)
-    * [createZone](#createZone)
-    * [listZones](#listZones)
-* [Example usage](#Example_usage)
-* [Distcp considerations](#Distcp_considerations)
-    * [Running as the superuser](#Running_as_the_superuser)
-    * [Copying into encrypted locations](#Copying_into_encrypted_locations)
-* [Rename and Trash considerations](#Rename_and_Trash_considerations)
-* [Attack vectors](#Attack_vectors)
-    * [Hardware access exploits](#Hardware_access_exploits)
-    * [Root access exploits](#Root_access_exploits)
-    * [HDFS admin exploits](#HDFS_admin_exploits)
-    * [Rogue user exploits](#Rogue_user_exploits)
+<!-- MACRO{toc|fromDepth=0|toDepth=2} -->
 
 <a name="Overview"></a>Overview
 --------
@@ -117,9 +94,10 @@ Once a KMS has been set up and the NameNode and HDFS clients have been correctly
 
 ### <a name="Configuring_the_cluster_KeyProvider"></a>Configuring the cluster KeyProvider
 
-#### dfs.encryption.key.provider.uri
+#### hadoop.security.key.provider.path
 
 The KeyProvider to use when interacting with encryption keys used when reading and writing to an encryption zone.
+HDFS clients will use the provider path returned from Namenode via getServerDefaults. If namenode doesn't support returning key provider uri then client's conf will be used.
 
 ### <a name="Selecting_an_encryption_algorithm_and_codec"></a>Selecting an encryption algorithm and codec
 
@@ -171,7 +149,7 @@ Create a new encryption zone.
 | | |
 |:---- |:---- |
 | *path* | The path of the encryption zone to create. It must be an empty directory. A trash directory is provisioned under this path.|
-| *keyName* | Name of the key to use for the encryption zone. |
+| *keyName* | Name of the key to use for the encryption zone. Uppercase key names are unsupported. |
 
 ### <a name="listZones"></a>listZones
 
@@ -188,6 +166,16 @@ Provision a trash directory for an encryption zone.
 | | |
 |:---- |:---- |
 | *path* | The path to the root of the encryption zone. |
+
+### <a name="getFileEncryptionInfo"></a>getFileEncryptionInfo
+
+Usage: `[-getFileEncryptionInfo -path <path>]`
+
+Get encryption information from a file. This can be used to find out whether a file is being encrypted, and the key name / key version used to encrypt it.
+
+| | |
+|:---- |:---- |
+| *path* | The path of the file to get encryption information. |
 
 <a name="Example_usage"></a>Example usage
 -------------
@@ -208,6 +196,10 @@ These instructions assume that you are running as the normal user or HDFS superu
     hadoop fs -put helloWorld /zone
     hadoop fs -cat /zone/helloWorld
 
+    # As the normal user, get encryption information from the file
+    hdfs crypto -getFileEncryptionInfo -path /zone/helloWorld
+    # console output: {cipherSuite: {name: AES/CTR/NoPadding, algorithmBlockSize: 16}, cryptoProtocolVersion: CryptoProtocolVersion{description='Encryption zones', version=1, unknownValue=null}, edek: 2010d301afbd43b58f10737ce4e93b39, iv: ade2293db2bab1a2e337f91361304cb3, keyName: mykey, ezKeyVersionName: mykey@0}
+
 <a name="Distcp_considerations"></a>Distcp considerations
 ---------------------
 
@@ -226,11 +218,13 @@ By default, distcp compares checksums provided by the filesystem to verify that 
 <a name="Rename_and_Trash_considerations"></a>Rename and Trash considerations
 ---------------------
 
-HDFS restricts file and directory renames across encryption zone boundaries. This includes renaming an encrypted file / directory into an unencrypted directory (e.g., `hdfs dfs mv /zone/encryptedFile /home/bob`), renaming an unencrypted file / directory into an encryption zone (e.g., `hdfs dfs mv /home/bob/unEncryptedFile /zone`), and renaming between two different encryption zones (e.g., `hdfs dfs mv /home/alice/zone1/foo /home/alice/zone2`). In these examples, `/zone`, `/home/alice/zone1`, and `/home/alice/zone2` are encryption zones, while `/home/bob` is not. A rename is only allowed if the source and destination paths are in the same encryption zone, or both paths are unencrypted (not in any encryption zone).
+HDFS restricts file and directory renames across encryption zone boundaries. This includes renaming an encrypted file / directory into an unencrypted directory (e.g., `hdfs dfs mv /zone/encryptedFile /home/bob`), renaming an unencrypted file or directory into an encryption zone (e.g., `hdfs dfs mv /home/bob/unEncryptedFile /zone`), and renaming between two different encryption zones (e.g., `hdfs dfs mv /home/alice/zone1/foo /home/alice/zone2`). In these examples, `/zone`, `/home/alice/zone1`, and `/home/alice/zone2` are encryption zones, while `/home/bob` is not. A rename is only allowed if the source and destination paths are in the same encryption zone, or both paths are unencrypted (not in any encryption zone).
 
 This restriction enhances security and eases system management significantly. All file EDEKs under an encryption zone are encrypted with the encryption zone key. Therefore, if the encryption zone key is compromised, it is important to identify all vulnerable files and re-encrypt them. This is fundamentally difficult if a file initially created in an encryption zone can be renamed to an arbitrary location in the filesystem.
 
 To comply with the above rule, each encryption zone has its own `.Trash` directory under the "zone directory". E.g., after `hdfs dfs rm /zone/encryptedFile`, `encryptedFile` will be moved to `/zone/.Trash`, instead of the `.Trash` directory under the user's home directory. When the entire encryption zone is deleted, the "zone directory" will be moved to the `.Trash` directory under the user's home directory.
+
+If the encryption zone is the root directory (e.g., `/` directory), the trash path of root directory is `/.Trash`, not the `.Trash` directory under the user's home directory, and the behavior of renaming sub-directories or sub-files in root directory will keep consistent with the behavior in a general encryption zone, such as `/zone` which is mentioned at the top of this section.
 
 The `crypto` command before Hadoop 2.8.0 does not provision the `.Trash` directory automatically. If an encryption zone is created before Hadoop 2.8.0, and then the cluster is upgraded to Hadoop 2.8.0 or above, the trash directory can be provisioned using `-provisionTrash` option (e.g., `hdfs crypto -provisionTrash -path /zone`).
 <a name="Attack_vectors"></a>Attack vectors

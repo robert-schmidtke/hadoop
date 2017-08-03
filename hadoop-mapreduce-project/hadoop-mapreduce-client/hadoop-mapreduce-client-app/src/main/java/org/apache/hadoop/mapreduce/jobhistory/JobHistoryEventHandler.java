@@ -52,6 +52,7 @@ import org.apache.hadoop.mapreduce.MRJobConfig;
 import org.apache.hadoop.mapreduce.TaskType;
 import org.apache.hadoop.mapreduce.TypeConverter;
 import org.apache.hadoop.mapreduce.util.JobHistoryEventUtils;
+import org.apache.hadoop.mapreduce.util.MRJobConfUtil;
 import org.apache.hadoop.mapreduce.v2.api.records.JobId;
 import org.apache.hadoop.mapreduce.v2.api.records.JobState;
 import org.apache.hadoop.mapreduce.v2.app.AppContext;
@@ -71,12 +72,11 @@ import org.apache.hadoop.yarn.api.records.timeline.TimelinePutResponse;
 import org.apache.hadoop.yarn.api.records.timelineservice.ApplicationEntity;
 import org.apache.hadoop.yarn.api.records.timelineservice.TimelineMetric;
 import org.apache.hadoop.yarn.client.api.TimelineClient;
+import org.apache.hadoop.yarn.client.api.TimelineV2Client;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.event.EventHandler;
 import org.apache.hadoop.yarn.exceptions.YarnException;
 import org.apache.hadoop.yarn.exceptions.YarnRuntimeException;
-import org.codehaus.jackson.map.ObjectMapper;
-import org.codehaus.jackson.node.JsonNodeFactory;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.sun.jersey.api.client.ClientHandlerException;
@@ -89,8 +89,6 @@ import com.sun.jersey.api.client.ClientHandlerException;
  */
 public class JobHistoryEventHandler extends AbstractService
     implements EventHandler<JobHistoryEvent> {
-  private static final JsonNodeFactory FACTORY =
-      new ObjectMapper().getNodeFactory();
 
   private final AppContext context;
   private final int startCount;
@@ -132,9 +130,10 @@ public class JobHistoryEventHandler extends AbstractService
   // should job completion be force when the AM shuts down?
   protected volatile boolean forceJobCompletion = false;
 
+  @VisibleForTesting
   protected TimelineClient timelineClient;
-
-  private boolean timelineServiceV2Enabled = false;
+  @VisibleForTesting
+  protected TimelineV2Client timelineV2Client;
 
   private static String MAPREDUCE_JOB_ENTITY_TYPE = "MAPREDUCE_JOB";
   private static String MAPREDUCE_TASK_ENTITY_TYPE = "MAPREDUCE_TASK";
@@ -267,12 +266,17 @@ public class JobHistoryEventHandler extends AbstractService
         MRJobConfig.DEFAULT_MAPREDUCE_JOB_EMIT_TIMELINE_DATA)) {
       LOG.info("Emitting job history data to the timeline service is enabled");
       if (YarnConfiguration.timelineServiceEnabled(conf)) {
-
-        timelineClient =
-            ((MRAppMaster.RunningAppContext)context).getTimelineClient();
-        timelineClient.init(conf);
-        timelineServiceV2Enabled =
-            YarnConfiguration.timelineServiceV2Enabled(conf);
+        boolean timelineServiceV2Enabled =
+            ((int) YarnConfiguration.getTimelineServiceVersion(conf) == 2);
+        if(timelineServiceV2Enabled) {
+          timelineV2Client =
+              ((MRAppMaster.RunningAppContext)context).getTimelineV2Client();
+          timelineV2Client.init(conf);
+        } else {
+          timelineClient =
+              ((MRAppMaster.RunningAppContext) context).getTimelineClient();
+          timelineClient.init(conf);
+        }
         LOG.info("Timeline service is enabled; version: " +
             YarnConfiguration.getTimelineServiceVersion(conf));
       } else {
@@ -323,6 +327,8 @@ public class JobHistoryEventHandler extends AbstractService
   protected void serviceStart() throws Exception {
     if (timelineClient != null) {
       timelineClient.start();
+    } else if (timelineV2Client != null) {
+      timelineV2Client.start();
     }
     eventHandlingThread = new Thread(new Runnable() {
       @Override
@@ -399,7 +405,7 @@ public class JobHistoryEventHandler extends AbstractService
         }
         mi.shutDownTimer();
       } catch (IOException e) {
-        LOG.info("Exception while cancelling delayed flush timer. "
+        LOG.info("Exception while canceling delayed flush timer. "
             + "Likely caused by a failed flush " + e.getMessage());
       }
     }
@@ -447,6 +453,8 @@ public class JobHistoryEventHandler extends AbstractService
     }
     if (timelineClient != null) {
       timelineClient.stop();
+    } else if (timelineV2Client != null) {
+      timelineV2Client.stop();
     }
     LOG.info("Stopped JobHistoryEventHandler. super.stop()");
     super.serviceStop();
@@ -507,16 +515,16 @@ public class JobHistoryEventHandler extends AbstractService
       if (conf != null) {
         // TODO Ideally this should be written out to the job dir
         // (.staging/jobid/files - RecoveryService will need to be patched)
-        FSDataOutputStream jobFileOut = null;
-        try {
-          if (logDirConfPath != null) {
-            jobFileOut = stagingDirFS.create(logDirConfPath, true);
-            conf.writeXml(jobFileOut);
-            jobFileOut.close();
+        if (logDirConfPath != null) {
+          Configuration redactedConf = new Configuration(conf);
+          MRJobConfUtil.redact(redactedConf);
+          try (FSDataOutputStream jobFileOut = stagingDirFS
+              .create(logDirConfPath, true)) {
+            redactedConf.writeXml(jobFileOut);
+          } catch (IOException e) {
+            LOG.info("Failed to write the job configuration file", e);
+            throw e;
           }
-        } catch (IOException e) {
-          LOG.info("Failed to write the job configuration file", e);
-          throw e;
         }
       }
     }
@@ -604,14 +612,12 @@ public class JobHistoryEventHandler extends AbstractService
         }
         processEventForJobSummary(event.getHistoryEvent(), mi.getJobSummary(),
             event.getJobID());
-        if (timelineClient != null) {
-          if (timelineServiceV2Enabled) {
-            processEventForNewTimelineService(historyEvent, event.getJobID(),
-                event.getTimestamp());
-          } else {
-            processEventForTimelineServer(historyEvent, event.getJobID(),
-                event.getTimestamp());
-          }
+        if (timelineV2Client != null) {
+          processEventForNewTimelineService(historyEvent, event.getJobID(),
+              event.getTimestamp());
+        } else if (timelineClient != null) {
+          processEventForTimelineServer(historyEvent, event.getJobID(),
+              event.getTimestamp());
         }
         if (LOG.isDebugEnabled()) {
           LOG.debug("In HistoryEventHandler "
@@ -1161,8 +1167,8 @@ public class JobHistoryEventHandler extends AbstractService
         configSize += size;
         if (configSize > JobHistoryEventUtils.ATS_CONFIG_PUBLISH_SIZE_BYTES) {
           if (jobEntityForConfigs.getConfigs().size() > 0) {
-            timelineClient.putEntities(jobEntityForConfigs);
-            timelineClient.putEntities(appEntityForConfigs);
+            timelineV2Client.putEntities(jobEntityForConfigs);
+            timelineV2Client.putEntities(appEntityForConfigs);
             jobEntityForConfigs = createJobEntity(jobId);
             appEntityForConfigs = new ApplicationEntity();
             appEntityForConfigs.setId(appId);
@@ -1173,8 +1179,8 @@ public class JobHistoryEventHandler extends AbstractService
         appEntityForConfigs.addConfig(entry.getKey(), entry.getValue());
       }
       if (configSize > 0) {
-        timelineClient.putEntities(jobEntityForConfigs);
-        timelineClient.putEntities(appEntityForConfigs);
+        timelineV2Client.putEntities(jobEntityForConfigs);
+        timelineV2Client.putEntities(appEntityForConfigs);
       }
     } catch (IOException | YarnException e) {
       LOG.error("Exception while publishing configs on JOB_SUBMITTED Event " +
@@ -1294,9 +1300,9 @@ public class JobHistoryEventHandler extends AbstractService
     }
     try {
       if (appEntityWithJobMetrics == null) {
-        timelineClient.putEntitiesAsync(tEntity);
+        timelineV2Client.putEntitiesAsync(tEntity);
       } else {
-        timelineClient.putEntities(tEntity, appEntityWithJobMetrics);
+        timelineV2Client.putEntities(tEntity, appEntityWithJobMetrics);
       }
     } catch (IOException | YarnException e) {
       LOG.error("Failed to process Event " + event.getEventType()
@@ -1621,9 +1627,7 @@ public class JobHistoryEventHandler extends AbstractService
     if (stagingDirFS.exists(fromPath)) {
       LOG.info("Copying " + fromPath.toString() + " to " + toPath.toString());
       // TODO temporarily removing the existing dst
-      if (doneDirFS.exists(toPath)) {
-        doneDirFS.delete(toPath, true);
-      }
+      doneDirFS.delete(toPath, true);
       boolean copied = FileUtil.copy(stagingDirFS, fromPath, doneDirFS, toPath,
           false, getConfig());
 
@@ -1634,10 +1638,6 @@ public class JobHistoryEventHandler extends AbstractService
       doneDirFS.setPermission(toPath, new FsPermission(
           JobHistoryUtils.HISTORY_INTERMEDIATE_FILE_PERMISSIONS));
     }
-  }
-
-  boolean pathExists(FileSystem fileSys, Path path) throws IOException {
-    return fileSys.exists(path);
   }
 
   private String getTempFileName(String srcFile) {

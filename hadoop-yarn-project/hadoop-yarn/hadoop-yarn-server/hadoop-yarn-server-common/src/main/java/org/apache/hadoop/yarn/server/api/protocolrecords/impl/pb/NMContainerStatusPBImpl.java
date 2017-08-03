@@ -83,6 +83,7 @@ public class NMContainerStatusPBImpl extends NMContainerStatus {
     StringBuilder sb = new StringBuilder();
     sb.append("[").append(getContainerId()).append(", ")
         .append("CreateTime: ").append(getCreationTime()).append(", ")
+        .append("Version: ").append(getVersion()).append(", ")
         .append("State: ").append(getContainerState()).append(", ")
         .append("Capability: ").append(getAllocatedResource()).append(", ")
         .append("Diagnostics: ").append(getDiagnostics()).append(", ")
@@ -185,6 +186,18 @@ public class NMContainerStatusPBImpl extends NMContainerStatus {
   }
 
   @Override
+  public int getVersion() {
+    NMContainerStatusProtoOrBuilder p = viaProto ? proto : builder;
+    return p.getVersion();
+  }
+
+  @Override
+  public void setVersion(int version) {
+    maybeInitBuilder();
+    builder.setVersion(version);
+  }
+
+  @Override
   public Priority getPriority() {
     NMContainerStatusProtoOrBuilder p = viaProto ? proto : builder;
     if (this.priority != null) {
@@ -243,9 +256,7 @@ public class NMContainerStatusPBImpl extends NMContainerStatus {
       builder.setContainerId(convertToProtoFormat(this.containerId));
     }
 
-    if (this.resource != null
-        && !((ResourcePBImpl) this.resource).getProto().equals(
-          builder.getResource())) {
+    if (this.resource != null) {
       builder.setResource(convertToProtoFormat(this.resource));
     }
 
@@ -282,7 +293,7 @@ public class NMContainerStatusPBImpl extends NMContainerStatus {
   }
 
   private ResourceProto convertToProtoFormat(Resource t) {
-    return ((ResourcePBImpl) t).getProto();
+    return ProtoUtils.convertToProtoFormat(t);
   }
 
   private ContainerStateProto

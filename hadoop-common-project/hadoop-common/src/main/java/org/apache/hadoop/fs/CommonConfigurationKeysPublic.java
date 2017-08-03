@@ -250,18 +250,43 @@ public class CommonConfigurationKeysPublic {
    * @deprecated Moved to mapreduce, see mapreduce.task.io.sort.mb
    * in mapred-default.xml
    * See https://issues.apache.org/jira/browse/HADOOP-6801
+   *
+   * For {@link org.apache.hadoop.io.SequenceFile.Sorter} control
+   * instead, see {@link #SEQ_IO_SORT_MB_KEY}.
    */
   public static final String  IO_SORT_MB_KEY = "io.sort.mb";
-  /** Default value for IO_SORT_MB_DEFAULT */
+  /** Default value for {@link #IO_SORT_MB_KEY}. */
   public static final int     IO_SORT_MB_DEFAULT = 100;
   /**
    * @deprecated Moved to mapreduce, see mapreduce.task.io.sort.factor
    * in mapred-default.xml
    * See https://issues.apache.org/jira/browse/HADOOP-6801
+   *
+   * For {@link org.apache.hadoop.io.SequenceFile.Sorter} control
+   * instead, see {@link #SEQ_IO_SORT_FACTOR_KEY}.
    */
   public static final String  IO_SORT_FACTOR_KEY = "io.sort.factor";
-  /** Default value for IO_SORT_FACTOR_DEFAULT */
+  /** Default value for {@link #IO_SORT_FACTOR_KEY}. */
   public static final int     IO_SORT_FACTOR_DEFAULT = 100;
+
+  /**
+   * @see
+   * <a href="{@docRoot}/../hadoop-project-dist/hadoop-common/core-default.xml">
+   * core-default.xml</a>
+   */
+  public static final String  SEQ_IO_SORT_MB_KEY = "seq.io.sort.mb";
+  /** Default value for {@link #SEQ_IO_SORT_MB_KEY}. */
+  public static final int     SEQ_IO_SORT_MB_DEFAULT = 100;
+
+  /**
+   * @see
+   * <a href="{@docRoot}/../hadoop-project-dist/hadoop-common/core-default.xml">
+   * core-default.xml</a>
+   */
+  public static final String  SEQ_IO_SORT_FACTOR_KEY = "seq.io.sort.factor";
+  /** Default value for {@link #SEQ_IO_SORT_FACTOR_KEY}. */
+  public static final int     SEQ_IO_SORT_FACTOR_DEFAULT = 100;
+
   /**
    * @see
    * <a href="{@docRoot}/../hadoop-project-dist/hadoop-common/core-default.xml">
@@ -517,6 +542,21 @@ public class CommonConfigurationKeysPublic {
    * <a href="{@docRoot}/../hadoop-project-dist/hadoop-common/core-default.xml">
    * core-default.xml</a>
    */
+  public static final String HADOOP_SECURITY_GROUP_SHELL_COMMAND_TIMEOUT_SECS =
+      "hadoop.security.groups.shell.command.timeout";
+  /**
+   * @see
+   * <a href="{@docRoot}/../hadoop-project-dist/hadoop-common/core-default.xml">
+   * core-default.xml</a>
+   */
+  public static final long
+          HADOOP_SECURITY_GROUP_SHELL_COMMAND_TIMEOUT_SECS_DEFAULT =
+          0L;
+  /**
+   * @see
+   * <a href="{@docRoot}/../hadoop-project-dist/hadoop-common/core-default.xml">
+   * core-default.xml</a>
+   */
   public static final String  HADOOP_SECURITY_AUTHENTICATION =
     "hadoop.security.authentication";
   /**
@@ -628,6 +668,14 @@ public class CommonConfigurationKeysPublic {
   public static final String  HADOOP_SECURITY_IMPERSONATION_PROVIDER_CLASS =
     "hadoop.security.impersonation.provider.class";
 
+  /**
+   * @see
+   * <a href="{@docRoot}/../hadoop-project-dist/hadoop-common/core-default.xml">
+   * core-default.xml</a>
+   */
+  public static final String HADOOP_SECURITY_KEY_PROVIDER_PATH =
+      "hadoop.security.key.provider.path";
+
   //  <!-- KMSClientProvider configurations -->
   /**
    * @see
@@ -670,6 +718,35 @@ public class CommonConfigurationKeysPublic {
       "hadoop.security.kms.client.encrypted.key.cache.expiry";
   /** Default value for KMS_CLIENT_ENC_KEY_CACHE_EXPIRY (12 hrs)*/
   public static final int KMS_CLIENT_ENC_KEY_CACHE_EXPIRY_DEFAULT = 43200000;
+
+  /**
+   * @see
+   * <a href="{@docRoot}/../hadoop-project-dist/hadoop-common/core-default.xml">
+   * core-default.xml</a>
+   */
+  /** Default value is the number of providers specified. */
+  public static final String KMS_CLIENT_FAILOVER_MAX_RETRIES_KEY =
+      "hadoop.security.kms.client.failover.max.retries";
+
+  /**
+   * @see
+   * <a href="{@docRoot}/../hadoop-project-dist/hadoop-common/core-default.xml">
+   * core-default.xml</a>
+   */
+  public static final String KMS_CLIENT_FAILOVER_SLEEP_BASE_MILLIS_KEY =
+      "hadoop.security.kms.client.failover.sleep.base.millis";
+  /**  Default value is 100 ms. */
+  public static final int KMS_CLIENT_FAILOVER_SLEEP_BASE_MILLIS_DEFAULT  = 100;
+
+  /**
+   * @see
+   * <a href="{@docRoot}/../hadoop-project-dist/hadoop-common/core-default.xml">
+   * core-default.xml</a>
+   */
+  public static final String KMS_CLIENT_FAILOVER_SLEEP_MAX_MILLIS_KEY =
+      "hadoop.security.kms.client.failover.sleep.max.millis";
+  /** Default value is 2 secs. */
+  public static final int KMS_CLIENT_FAILOVER_SLEEP_MAX_MILLIS_DEFAULT  = 2000;
 
   /**
    * @see
@@ -727,5 +804,50 @@ public class CommonConfigurationKeysPublic {
       "hadoop.http.logs.enabled";
   /** Defalt value for HADOOP_HTTP_LOGS_ENABLED */
   public static final boolean HADOOP_HTTP_LOGS_ENABLED_DEFAULT = true;
+
+  /**
+   * @see
+   * <a href="{@docRoot}/../hadoop-project-dist/hadoop-common/core-default.xml">
+   * core-default.xml</a>
+   */
+  public static final String HADOOP_SECURITY_CREDENTIAL_PROVIDER_PATH =
+      "hadoop.security.credential.provider.path";
+
+  /**
+   * @see
+   * <a href="{@docRoot}/../hadoop-project-dist/hadoop-common/core-default.xml">
+   * core-default.xml</a>
+   */
+  public static final String HADOOP_SECURITY_CREDENTIAL_CLEAR_TEXT_FALLBACK =
+      "hadoop.security.credential.clear-text-fallback";
+  public static final boolean
+      HADOOP_SECURITY_CREDENTIAL_CLEAR_TEXT_FALLBACK_DEFAULT = true;
+
+  /**
+   * @see
+   * <a href="{@docRoot}/../hadoop-project-dist/hadoop-common/core-default.xml">
+   * core-default.xml</a>
+   */
+  public static final String  HADOOP_SECURITY_CREDENTIAL_PASSWORD_FILE_KEY =
+      "hadoop.security.credstore.java-keystore-provider.password-file";
+
+  /**
+   * @see
+   * <a href="{@docRoot}/../hadoop-project-dist/hadoop-common/core-default.xml">
+   * core-default.xml</a>
+   */
+  public static final String HADOOP_SECURITY_SENSITIVE_CONFIG_KEYS =
+      "hadoop.security.sensitive-config-keys";
+  public static final String HADOOP_SECURITY_SENSITIVE_CONFIG_KEYS_DEFAULT =
+      String.join(",",
+          "secret$",
+          "password$",
+          "ssl.keystore.pass$",
+          "fs.s3.*[Ss]ecret.?[Kk]ey",
+          "fs.s3a.*.server-side-encryption.key",
+          "fs.azure\\.account.key.*",
+          "credential$",
+          "oauth.*token$",
+          HADOOP_SECURITY_SENSITIVE_CONFIG_KEYS);
 }
 

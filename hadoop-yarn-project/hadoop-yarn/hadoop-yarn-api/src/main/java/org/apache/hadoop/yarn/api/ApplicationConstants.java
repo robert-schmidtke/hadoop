@@ -160,13 +160,6 @@ public interface ApplicationConstants {
     LD_LIBRARY_PATH("LD_LIBRARY_PATH"),
 
     /**
-     * $YARN_RESOURCEMANAGER_APPLICATION_QUEUE
-     * The queue into which the app was submitted/launched.
-     */
-    YARN_RESOURCEMANAGER_APPLICATION_QUEUE(
-        "YARN_RESOURCEMANAGER_APPLICATION_QUEUE"),
-
-    /**
      * $HADOOP_CONF_DIR
      * Final, non-modifiable.
      */
@@ -263,6 +256,7 @@ public interface ApplicationConstants {
      * Note: Use $$() method for cross-platform practice i.e. submit an
      * application from a Windows client to a Linux/Unix server or vice versa.
      * </p>
+     * @return expanded environment variable.
      */
     public String $() {
       if (Shell.WINDOWS) {
@@ -278,6 +272,7 @@ public interface ApplicationConstants {
      * expansion marker ('%' for Windows and '$' for Linux) by NodeManager on
      * container launch. For example: {{VAR}} will be replaced as $VAR on Linux,
      * and %VAR% on Windows.
+     * @return expanded environment variable.
      */
     @Public
     @Unstable

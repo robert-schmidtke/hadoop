@@ -45,7 +45,7 @@ import org.apache.hadoop.yarn.server.api.records.NodeStatus;
 import org.apache.hadoop.yarn.server.utils.BuilderUtils;
 import org.apache.hadoop.yarn.util.Records;
 import org.apache.hadoop.yarn.util.YarnVersionInfo;
-import org.mortbay.log.Log;
+import org.eclipse.jetty.util.log.Log;
 
 public class MockNM {
 
@@ -175,7 +175,7 @@ public class MockNM {
     ArrayList<ContainerStatus> containerStatusList =
         new ArrayList<ContainerStatus>(1);
     containerStatusList.add(containerStatus);
-    Log.info("ContainerStatus: " + containerStatus);
+    Log.getLog().info("ContainerStatus: " + containerStatus);
     return nodeHeartbeat(containerStatusList,
         Collections.<Container>emptyList(), true, ++responseId);
   }
@@ -193,6 +193,12 @@ public class MockNM {
     }
     return nodeHeartbeat(updatedStats, Collections.<Container>emptyList(),
         isHealthy, resId);
+  }
+
+  public NodeHeartbeatResponse nodeHeartbeat(
+      List<ContainerStatus> updatedStats, boolean isHealthy) throws Exception {
+    return nodeHeartbeat(updatedStats, Collections.<Container>emptyList(),
+        isHealthy, ++responseId);
   }
 
   public NodeHeartbeatResponse nodeHeartbeat(List<ContainerStatus> updatedStats,
@@ -255,5 +261,9 @@ public class MockNM {
 
   public int getvCores() {
     return vCores;
+  }
+
+  public String getVersion() {
+    return version;
   }
 }

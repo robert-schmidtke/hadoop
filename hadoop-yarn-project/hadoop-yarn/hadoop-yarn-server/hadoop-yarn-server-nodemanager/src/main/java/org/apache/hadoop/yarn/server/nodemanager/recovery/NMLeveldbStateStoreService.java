@@ -24,12 +24,15 @@ import static org.fusesource.leveldbjni.JniDBFactory.bytes;
 import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Timer;
 import java.util.TimerTask;
+import java.util.Set;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -44,6 +47,7 @@ import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.hadoop.yarn.api.records.Resource;
+import org.apache.hadoop.yarn.api.records.impl.pb.ProtoUtils;
 import org.apache.hadoop.yarn.api.records.impl.pb.ResourcePBImpl;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.proto.YarnProtos.ResourceProto;
@@ -70,6 +74,8 @@ import org.iq80.leveldb.Options;
 import org.iq80.leveldb.WriteBatch;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.ArrayListMultimap;
+import com.google.common.collect.ListMultimap;
 
 public class NMLeveldbStateStoreService extends NMStateStoreService {
 
@@ -78,9 +84,12 @@ public class NMLeveldbStateStoreService extends NMStateStoreService {
 
   private static final String DB_NAME = "yarn-nm-state";
   private static final String DB_SCHEMA_VERSION_KEY = "nm-schema-version";
-  
-  private static final Version CURRENT_VERSION_INFO = Version
-      .newInstance(2, 0);
+
+  /**
+   * Changes from 1.0 to 1.1: Save AMRMProxy state in NMSS.
+   * Changes from 1.2 to 1.2: Save queued container information.
+   */
+  private static final Version CURRENT_VERSION_INFO = Version.newInstance(1, 2);
 
   private static final String DELETION_TASK_KEY_PREFIX =
       "DeletionService/deltask_";
@@ -104,6 +113,7 @@ public class NMLeveldbStateStoreService extends NMStateStoreService {
   private static final String CONTAINERS_KEY_PREFIX =
       "ContainerManager/containers/";
   private static final String CONTAINER_REQUEST_KEY_SUFFIX = "/request";
+  private static final String CONTAINER_VERSION_KEY_SUFFIX = "/version";
   private static final String CONTAINER_DIAGS_KEY_SUFFIX = "/diagnostics";
   private static final String CONTAINER_LAUNCHED_KEY_SUFFIX = "/launched";
   private static final String CONTAINER_QUEUED_KEY_SUFFIX = "/queued";
@@ -118,6 +128,7 @@ public class NMLeveldbStateStoreService extends NMStateStoreService {
 
   private static final String CURRENT_MASTER_KEY_SUFFIX = "CurrentMasterKey";
   private static final String PREV_MASTER_KEY_SUFFIX = "PreviousMasterKey";
+  private static final String NEXT_MASTER_KEY_SUFFIX = "NextMasterKey";
   private static final String NM_TOKENS_KEY_PREFIX = "NMTokens/";
   private static final String NM_TOKENS_CURRENT_MASTER_KEY =
       NM_TOKENS_KEY_PREFIX + CURRENT_MASTER_KEY_SUFFIX;
@@ -132,11 +143,19 @@ public class NMLeveldbStateStoreService extends NMStateStoreService {
 
   private static final String LOG_DELETER_KEY_PREFIX = "LogDeleters/";
 
+  private static final String AMRMPROXY_KEY_PREFIX = "AMRMProxy/";
+
   private static final byte[] EMPTY_VALUE = new byte[0];
 
   private DB db;
   private boolean isNewlyCreated;
   private Timer compactionTimer;
+
+  /**
+   * Map of containerID vs List of unknown key suffixes.
+   */
+  private ListMultimap<ContainerId, String> containerUnknownKeySuffixes =
+      ArrayListMultimap.create();
 
   public NMLeveldbStateStoreService() {
     super(NMLeveldbStateStoreService.class.getName());
@@ -238,6 +257,8 @@ public class NMLeveldbStateStoreService extends NMStateStoreService {
       if (suffix.equals(CONTAINER_REQUEST_KEY_SUFFIX)) {
         rcs.startRequest = new StartContainerRequestPBImpl(
             StartContainerRequestProto.parseFrom(entry.getValue()));
+      } else if (suffix.equals(CONTAINER_VERSION_KEY_SUFFIX)) {
+        rcs.version = Integer.parseInt(asString(entry.getValue()));
       } else if (suffix.equals(CONTAINER_DIAGS_KEY_SUFFIX)) {
         rcs.diagnostics = asString(entry.getValue());
       } else if (suffix.equals(CONTAINER_QUEUED_KEY_SUFFIX)) {
@@ -265,28 +286,49 @@ public class NMLeveldbStateStoreService extends NMStateStoreService {
       } else if (suffix.equals(CONTAINER_LOG_DIR_KEY_SUFFIX)) {
         rcs.setLogDir(asString(entry.getValue()));
       } else {
-        throw new IOException("Unexpected container state key: " + key);
+        LOG.warn("the container " + containerId
+            + " will be killed because of the unknown key " + key
+            + " during recovery.");
+        containerUnknownKeySuffixes.put(containerId, suffix);
+        rcs.setRecoveryType(RecoveredContainerType.KILL);
       }
     }
     return rcs;
   }
 
   @Override
-  public void storeContainer(ContainerId containerId,
+  public void storeContainer(ContainerId containerId, int containerVersion,
       StartContainerRequest startRequest) throws IOException {
+    String idStr = containerId.toString();
     if (LOG.isDebugEnabled()) {
-      LOG.debug("storeContainer: containerId= " + containerId
+      LOG.debug("storeContainer: containerId= " + idStr
           + ", startRequest= " + startRequest);
     }
-
-    String key = CONTAINERS_KEY_PREFIX + containerId.toString()
+    String keyRequest = CONTAINERS_KEY_PREFIX + idStr
         + CONTAINER_REQUEST_KEY_SUFFIX;
+    String keyVersion = getContainerVersionKey(idStr);
     try {
-      db.put(bytes(key),
-        ((StartContainerRequestPBImpl) startRequest).getProto().toByteArray());
+      WriteBatch batch = db.createWriteBatch();
+      try {
+        batch.put(bytes(keyRequest),
+            ((StartContainerRequestPBImpl) startRequest)
+                .getProto().toByteArray());
+        if (containerVersion != 0) {
+          batch.put(bytes(keyVersion),
+              bytes(Integer.toString(containerVersion)));
+        }
+        db.write(batch);
+      } finally {
+        batch.close();
+      }
     } catch (DBException e) {
       throw new IOException(e);
     }
+  }
+
+  @VisibleForTesting
+  String getContainerVersionKey(String containerId) {
+    return CONTAINERS_KEY_PREFIX + containerId + CONTAINER_VERSION_KEY_SUFFIX;
   }
 
   @Override
@@ -339,18 +381,27 @@ public class NMLeveldbStateStoreService extends NMStateStoreService {
 
   @Override
   public void storeContainerResourceChanged(ContainerId containerId,
-      Resource capability) throws IOException {
+      int containerVersion, Resource capability) throws IOException {
     if (LOG.isDebugEnabled()) {
       LOG.debug("storeContainerResourceChanged: containerId=" + containerId
           + ", capability=" + capability);
     }
 
-    String key = CONTAINERS_KEY_PREFIX + containerId.toString()
+    String keyResChng = CONTAINERS_KEY_PREFIX + containerId.toString()
         + CONTAINER_RESOURCE_CHANGED_KEY_SUFFIX;
+    String keyVersion = CONTAINERS_KEY_PREFIX + containerId.toString()
+        + CONTAINER_VERSION_KEY_SUFFIX;
     try {
-      // New value will overwrite old values for the same key
-      db.put(bytes(key),
-          ((ResourcePBImpl) capability).getProto().toByteArray());
+      WriteBatch batch = db.createWriteBatch();
+      try {
+        // New value will overwrite old values for the same key
+        batch.put(bytes(keyResChng),
+            ProtoUtils.convertToProtoFormat(capability).toByteArray());
+        batch.put(bytes(keyVersion), bytes(Integer.toString(containerVersion)));
+        db.write(batch);
+      } finally {
+        batch.close();
+      }
     } catch (DBException e) {
       throw new IOException(e);
     }
@@ -441,6 +492,11 @@ public class NMLeveldbStateStoreService extends NMStateStoreService {
         batch.delete(bytes(keyPrefix + CONTAINER_QUEUED_KEY_SUFFIX));
         batch.delete(bytes(keyPrefix + CONTAINER_KILLED_KEY_SUFFIX));
         batch.delete(bytes(keyPrefix + CONTAINER_EXIT_CODE_KEY_SUFFIX));
+        List<String> unknownKeysForContainer = containerUnknownKeySuffixes
+            .removeAll(containerId);
+        for (String unknownKeySuffix : unknownKeysForContainer) {
+          batch.delete(bytes(keyPrefix + unknownKeySuffix));
+        }
         db.write(batch);
       } finally {
         batch.close();
@@ -1079,6 +1135,177 @@ public class NMLeveldbStateStoreService extends NMStateStoreService {
   }
 
   @Override
+  public RecoveredAMRMProxyState loadAMRMProxyState() throws IOException {
+    RecoveredAMRMProxyState result = new RecoveredAMRMProxyState();
+    Set<String> unknownKeys = new HashSet<>();
+    LeveldbIterator iter = null;
+    try {
+      iter = new LeveldbIterator(db);
+      iter.seek(bytes(AMRMPROXY_KEY_PREFIX));
+      while (iter.hasNext()) {
+        Entry<byte[], byte[]> entry = iter.peekNext();
+        String key = asString(entry.getKey());
+        if (!key.startsWith(AMRMPROXY_KEY_PREFIX)) {
+          break;
+        }
+
+        String suffix = key.substring(AMRMPROXY_KEY_PREFIX.length());
+        if (suffix.equals(CURRENT_MASTER_KEY_SUFFIX)) {
+          iter.next();
+          result.setCurrentMasterKey(parseMasterKey(entry.getValue()));
+          LOG.info("Recovered for AMRMProxy: current master key id "
+              + result.getCurrentMasterKey().getKeyId());
+
+        } else if (suffix.equals(NEXT_MASTER_KEY_SUFFIX)) {
+          iter.next();
+          result.setNextMasterKey(parseMasterKey(entry.getValue()));
+          LOG.info("Recovered for AMRMProxy: next master key id "
+              + result.getNextMasterKey().getKeyId());
+
+        } else { // Load AMRMProxy application context map for an app attempt
+          // Parse appAttemptId, also handle the unknown keys
+          int idEndPos;
+          ApplicationAttemptId attemptId;
+          try {
+            idEndPos = key.indexOf('/', AMRMPROXY_KEY_PREFIX.length());
+            if (idEndPos < 0) {
+              throw new IOException(
+                  "Unable to determine attemptId in key: " + key);
+            }
+            attemptId = ApplicationAttemptId.fromString(
+                key.substring(AMRMPROXY_KEY_PREFIX.length(), idEndPos));
+          } catch (Exception e) {
+            // Try to move on for back-forward compatibility
+            LOG.warn("Unknown key " + key + ", remove and move on", e);
+            // Do this because iter.remove() is not supported here
+            unknownKeys.add(key);
+            continue;
+          }
+          // Parse the context map for the appAttemptId
+          Map<String, byte[]> appContext =
+              loadAMRMProxyAppContextMap(iter, key.substring(0, idEndPos + 1));
+          result.getAppContexts().put(attemptId, appContext);
+
+          LOG.info("Recovered for AMRMProxy: " + attemptId + ", map size "
+              + appContext.size());
+        }
+      }
+    } catch (DBException e) {
+      throw new IOException(e);
+    } finally {
+      if (iter != null) {
+        iter.close();
+      }
+    }
+
+    // Delete all unknown keys
+    try {
+      for (String key : unknownKeys) {
+        db.delete(bytes(key));
+      }
+    } catch (DBException e) {
+      throw new IOException(e);
+    }
+
+    return result;
+  }
+
+  private Map<String, byte[]> loadAMRMProxyAppContextMap(LeveldbIterator iter,
+      String keyPrefix) throws IOException {
+    Map<String, byte[]> appContextMap = new HashMap<>();
+    while (iter.hasNext()) {
+      Entry<byte[], byte[]> entry = iter.peekNext();
+      String key = asString(entry.getKey());
+      if (!key.startsWith(keyPrefix)) {
+        break;
+      }
+      iter.next();
+      String suffix = key.substring(keyPrefix.length());
+      byte[] data = entry.getValue();
+      appContextMap.put(suffix, Arrays.copyOf(data, data.length));
+    }
+    return appContextMap;
+  }
+
+  @Override
+  public void storeAMRMProxyCurrentMasterKey(MasterKey key) throws IOException {
+    storeMasterKey(AMRMPROXY_KEY_PREFIX + CURRENT_MASTER_KEY_SUFFIX, key);
+  }
+
+  @Override
+  public void storeAMRMProxyNextMasterKey(MasterKey key) throws IOException {
+    String dbkey = AMRMPROXY_KEY_PREFIX + NEXT_MASTER_KEY_SUFFIX;
+    if (key == null) {
+      // When key is null, delete the entry instead
+      try {
+        db.delete(bytes(dbkey));
+      } catch (DBException e) {
+        throw new IOException(e);
+      }
+      return;
+    }
+    storeMasterKey(dbkey, key);
+  }
+
+  @Override
+  public void storeAMRMProxyAppContextEntry(ApplicationAttemptId attempt,
+      String key, byte[] data) throws IOException {
+    String fullkey = AMRMPROXY_KEY_PREFIX + attempt + "/" + key;
+    try {
+      db.put(bytes(fullkey), data);
+    } catch (DBException e) {
+      throw new IOException(e);
+    }
+  }
+
+  @Override
+  public void removeAMRMProxyAppContextEntry(ApplicationAttemptId attempt,
+      String key) throws IOException {
+    String fullkey = AMRMPROXY_KEY_PREFIX + attempt + "/" + key;
+    try {
+      db.delete(bytes(fullkey));
+    } catch (DBException e) {
+      throw new IOException(e);
+    }
+  }
+
+  @Override
+  public void removeAMRMProxyAppContext(ApplicationAttemptId attempt)
+      throws IOException {
+    Set<String> candidates = new HashSet<>();
+    String keyPrefix = AMRMPROXY_KEY_PREFIX + attempt + "/";
+    LeveldbIterator iter = null;
+    try {
+      iter = new LeveldbIterator(db);
+      iter.seek(bytes(keyPrefix));
+      while (iter.hasNext()) {
+        Entry<byte[], byte[]> entry = iter.next();
+        String key = asString(entry.getKey());
+        if (!key.startsWith(keyPrefix)) {
+          break;
+        }
+        // Do this because iter.remove() is not supported here
+        candidates.add(key);
+      }
+    } catch (DBException e) {
+      throw new IOException(e);
+    } finally {
+      if (iter != null) {
+        iter.close();
+      }
+    }
+
+    // Delete all candidate keys
+    try {
+      for (String key : candidates) {
+        db.delete(bytes(key));
+      }
+    } catch (DBException e) {
+      throw new IOException(e);
+    }
+  }
+
+  @Override
   protected void initStorage(Configuration conf)
       throws IOException {
     db = openDatabase(conf);
@@ -1201,6 +1428,11 @@ public class NMLeveldbStateStoreService extends NMStateStoreService {
     return CURRENT_VERSION_INFO;
   }
   
+  @VisibleForTesting
+  DB getDB() {
+    return db;
+  }
+
   /**
    * 1) Versioning scheme: major.minor. For e.g. 1.0, 1.1, 1.2...1.25, 2.0 etc.
    * 2) Any incompatible change of state-store is a major upgrade, and any

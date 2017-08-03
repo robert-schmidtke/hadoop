@@ -188,14 +188,6 @@ public class AMLauncher implements Runnable {
     // Construct the actual Container
     ContainerLaunchContext container =
         applicationMasterContext.getAMContainerSpec();
-    LOG.info("Command to launch container "
-        + containerID
-        + " : "
-        + StringUtils.arrayToString(container.getCommands().toArray(
-            new String[0])));
-
-    // Populate the current queue name in the environment variable.
-    setupQueueNameEnv(container, applicationMasterContext);
 
     // Finalize the container
     setupTokens(container, containerID);
@@ -203,16 +195,6 @@ public class AMLauncher implements Runnable {
     setFlowContext(container);
 
     return container;
-  }
-
-  private void setupQueueNameEnv(ContainerLaunchContext container,
-      ApplicationSubmissionContext applicationMasterContext) {
-    String queueName = applicationMasterContext.getQueue();
-    if (queueName == null) {
-      queueName = YarnConfiguration.DEFAULT_QUEUE_NAME;
-    }
-    container.getEnvironment().put(ApplicationConstants.Environment
-            .YARN_RESOURCEMANAGER_APPLICATION_QUEUE.key(), queueName);
   }
 
   @Private

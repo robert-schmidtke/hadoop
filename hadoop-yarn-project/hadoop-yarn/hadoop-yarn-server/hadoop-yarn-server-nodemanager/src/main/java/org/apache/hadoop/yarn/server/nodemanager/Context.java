@@ -27,14 +27,14 @@ import org.apache.hadoop.security.Credentials;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.hadoop.yarn.api.records.NodeId;
-import org.apache.hadoop.yarn.security.ContainerTokenIdentifier;
 import org.apache.hadoop.yarn.server.api.protocolrecords.LogAggregationReport;
 import org.apache.hadoop.yarn.server.api.records.NodeHealthStatus;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.ContainerManager;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.application.Application;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.container.Container;
+
 import org.apache.hadoop.yarn.server.nodemanager.recovery.NMStateStoreService;
-import org.apache.hadoop.yarn.server.nodemanager.scheduler.OpportunisticContainerAllocator;
+import org.apache.hadoop.yarn.server.scheduler.OpportunisticContainerAllocator;
 import org.apache.hadoop.yarn.server.nodemanager.security.NMContainerTokenSecretManager;
 import org.apache.hadoop.yarn.server.nodemanager.security.NMTokenSecretManagerInNM;
 import org.apache.hadoop.yarn.server.nodemanager.timelineservice.NMTimelinePublisher;
@@ -45,15 +45,6 @@ import org.apache.hadoop.yarn.server.security.ApplicationACLsManager;
  * NodeManager.
  */
 public interface Context {
-
-  /**
-   * Interface exposing methods related to the queuing of containers in the NM.
-   */
-  interface QueuingContext {
-    ConcurrentMap<ContainerId, ContainerTokenIdentifier> getQueuedContainers();
-
-    ConcurrentMap<ContainerTokenIdentifier, String> getKilledQueuedContainers();
-  }
 
   /**
    * Return the nodeId. Usable only when the ContainerManager is started.
@@ -112,13 +103,6 @@ public interface Context {
 
   NodeStatusUpdater getNodeStatusUpdater();
 
-  /**
-   * Returns a <code>QueuingContext</code> that provides information about the
-   * number of Containers Queued as well as the number of Containers that were
-   * queued and killed.
-   */
-  QueuingContext getQueuingContext();
-
   boolean isDistributedSchedulingEnabled();
 
   OpportunisticContainerAllocator getContainerAllocator();
@@ -126,4 +110,6 @@ public interface Context {
   void setNMTimelinePublisher(NMTimelinePublisher nmMetricsPublisher);
 
   NMTimelinePublisher getNMTimelinePublisher();
+
+  ContainerExecutor getContainerExecutor();
 }

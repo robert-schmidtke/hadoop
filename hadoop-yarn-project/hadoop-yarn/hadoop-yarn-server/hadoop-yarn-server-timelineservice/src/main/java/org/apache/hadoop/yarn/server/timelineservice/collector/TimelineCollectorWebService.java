@@ -41,6 +41,7 @@ import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.classification.InterfaceAudience.Public;
 import org.apache.hadoop.classification.InterfaceStability.Unstable;
+import org.apache.hadoop.http.JettyUtils;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.timelineservice.ApplicationAttemptEntity;
@@ -111,7 +112,8 @@ public class TimelineCollectorWebService {
    * @return description of timeline web service.
    */
   @GET
-  @Produces({ MediaType.APPLICATION_JSON /* , MediaType.APPLICATION_XML */})
+  @Produces({ MediaType.APPLICATION_JSON + "; " + JettyUtils.UTF_8
+      /* , MediaType.APPLICATION_XML */})
   public AboutInfo about(
       @Context HttpServletRequest req,
       @Context HttpServletResponse res) {
@@ -150,9 +152,6 @@ public class TimelineCollectorWebService {
       throw new ForbiddenException(msg);
     }
 
-    // TODO how to express async posts and handle them
-    boolean isAsync = async != null && async.trim().equalsIgnoreCase("true");
-
     try {
       ApplicationId appID = parseApplicationId(appId);
       if (appID == null) {
@@ -167,7 +166,14 @@ public class TimelineCollectorWebService {
         throw new NotFoundException(); // different exception?
       }
 
-      collector.putEntities(processTimelineEntities(entities), callerUgi);
+      boolean isAsync = async != null && async.trim().equalsIgnoreCase("true");
+      if (isAsync) {
+        collector.putEntitiesAsync(
+            processTimelineEntities(entities), callerUgi);
+      } else {
+        collector.putEntities(processTimelineEntities(entities), callerUgi);
+      }
+
       return Response.ok().build();
     } catch (Exception e) {
       LOG.error("Error putting entities", e);

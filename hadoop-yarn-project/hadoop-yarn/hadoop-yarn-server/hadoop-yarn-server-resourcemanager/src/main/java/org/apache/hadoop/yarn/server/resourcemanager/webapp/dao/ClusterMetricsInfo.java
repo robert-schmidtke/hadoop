@@ -25,6 +25,7 @@ import org.apache.hadoop.yarn.server.resourcemanager.ClusterMetrics;
 import org.apache.hadoop.yarn.server.resourcemanager.ResourceManager;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.QueueMetrics;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.ResourceScheduler;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.CapacityScheduler;
 
 @XmlRootElement(name = "clusterMetrics")
 @XmlAccessorType(XmlAccessType.FIELD)
@@ -64,7 +65,10 @@ public class ClusterMetricsInfo {
   } // JAXB needs this
 
   public ClusterMetricsInfo(final ResourceManager rm) {
-    ResourceScheduler rs = rm.getResourceScheduler();
+    this(rm.getResourceScheduler());
+  }
+
+  public ClusterMetricsInfo(final ResourceScheduler rs) {
     QueueMetrics metrics = rs.getRootQueueMetrics();
     ClusterMetrics clusterMetrics = ClusterMetrics.getMetrics();
 
@@ -87,8 +91,14 @@ public class ClusterMetricsInfo {
     this.containersPending = metrics.getPendingContainers();
     this.containersReserved = metrics.getReservedContainers();
 
-    this.totalMB = availableMB + allocatedMB;
-    this.totalVirtualCores = availableVirtualCores + allocatedVirtualCores;
+    if (rs instanceof CapacityScheduler) {
+      this.totalMB = availableMB + allocatedMB + reservedMB;
+      this.totalVirtualCores = availableVirtualCores + allocatedVirtualCores
+          + containersReserved;
+    } else {
+      this.totalMB = availableMB + allocatedMB;
+      this.totalVirtualCores = availableVirtualCores + allocatedVirtualCores;
+    }
     this.activeNodes = clusterMetrics.getNumActiveNMs();
     this.lostNodes = clusterMetrics.getNumLostNMs();
     this.unhealthyNodes = clusterMetrics.getUnhealthyNMs();
@@ -97,7 +107,7 @@ public class ClusterMetricsInfo {
     this.rebootedNodes = clusterMetrics.getNumRebootedNMs();
     this.shutdownNodes = clusterMetrics.getNumShutdownNMs();
     this.totalNodes = activeNodes + lostNodes + decommissionedNodes
-        + rebootedNodes + unhealthyNodes + shutdownNodes;
+        + rebootedNodes + unhealthyNodes + decommissioningNodes + shutdownNodes;
   }
 
   public int getAppsSubmitted() {

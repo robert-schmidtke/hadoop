@@ -54,10 +54,23 @@ public class ClientDistributedCacheManager {
   public static void determineTimestampsAndCacheVisibilities(Configuration job)
   throws IOException {
     Map<URI, FileStatus> statCache = new HashMap<URI, FileStatus>();
+    determineTimestampsAndCacheVisibilities(job, statCache);
+  }
+
+  /**
+   * See ClientDistributedCacheManager#determineTimestampsAndCacheVisibilities(
+   * Configuration).
+   *
+   * @param job Configuration of a job
+   * @param statCache A map containing cached file status objects
+   * @throws IOException if there is a problem with the underlying filesystem
+   */
+  public static void determineTimestampsAndCacheVisibilities(Configuration job,
+      Map<URI, FileStatus> statCache) throws IOException {
     determineTimestamps(job, statCache);
     determineCacheVisibilities(job, statCache);
   }
-  
+
   /**
    * Determines timestamps of files to be cached, and stores those
    * in the configuration.  This is intended to be used internally by JobClient
@@ -281,10 +294,21 @@ public class ClientDistributedCacheManager {
       FsAction action, Map<URI, FileStatus> statCache) throws IOException {
     FileStatus status = getFileStatus(fs, path.toUri(), statCache);
     FsPermission perms = status.getPermission();
-    FsAction otherAction = perms.getOtherAction();
-    if (otherAction.implies(action)) {
-      return true;
+
+    // Encrypted files are always treated as private. This stance has two
+    // important side effects.  The first is that the encrypted files will be
+    // downloaded as the job owner instead of the YARN user, which is required
+    // for the KMS ACLs to work as expected.  Second, it prevent a file with
+    // world readable permissions that is stored in an encryption zone from
+    // being localized as a publicly shared file with world readable
+    // permissions.
+    if (!perms.getEncryptedBit()) {
+      FsAction otherAction = perms.getOtherAction();
+      if (otherAction.implies(action)) {
+        return true;
+      }
     }
+
     return false;
   }
 

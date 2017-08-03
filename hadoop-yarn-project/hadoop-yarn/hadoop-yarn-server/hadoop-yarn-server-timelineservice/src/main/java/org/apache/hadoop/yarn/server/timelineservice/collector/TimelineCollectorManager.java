@@ -36,7 +36,6 @@ import org.apache.hadoop.util.ReflectionUtils;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.exceptions.YarnRuntimeException;
-import org.apache.hadoop.yarn.server.timelineservice.storage.HBaseTimelineWriterImpl;
 import org.apache.hadoop.yarn.server.timelineservice.storage.TimelineWriter;
 
 import com.google.common.annotations.VisibleForTesting;
@@ -59,10 +58,7 @@ public class TimelineCollectorManager extends AbstractService {
 
   @Override
   public void serviceInit(Configuration conf) throws Exception {
-    writer = ReflectionUtils.newInstance(conf.getClass(
-        YarnConfiguration.TIMELINE_SERVICE_WRITER_CLASS,
-        HBaseTimelineWriterImpl.class,
-        TimelineWriter.class), conf);
+    writer = createTimelineWriter(conf);
     writer.init(conf);
     // create a single dedicated thread for flushing the writer on a periodic
     // basis
@@ -73,6 +69,26 @@ public class TimelineCollectorManager extends AbstractService {
         YarnConfiguration.
         DEFAULT_TIMELINE_SERVICE_WRITER_FLUSH_INTERVAL_SECONDS);
     super.serviceInit(conf);
+  }
+
+  private TimelineWriter createTimelineWriter(final Configuration conf) {
+    String timelineWriterClassName = conf.get(
+        YarnConfiguration.TIMELINE_SERVICE_WRITER_CLASS,
+            YarnConfiguration.DEFAULT_TIMELINE_SERVICE_WRITER_CLASS);
+    LOG.info("Using TimelineWriter: " + timelineWriterClassName);
+    try {
+      Class<?> timelineWriterClazz = Class.forName(timelineWriterClassName);
+      if (TimelineWriter.class.isAssignableFrom(timelineWriterClazz)) {
+        return (TimelineWriter) ReflectionUtils.newInstance(
+            timelineWriterClazz, conf);
+      } else {
+        throw new YarnRuntimeException("Class: " + timelineWriterClassName
+            + " not instance of " + TimelineWriter.class.getCanonicalName());
+      }
+    } catch (ClassNotFoundException e) {
+      throw new YarnRuntimeException("Could not instantiate TimelineWriter: "
+          + timelineWriterClassName, e);
+    }
   }
 
   @Override
@@ -203,8 +219,10 @@ public class TimelineCollectorManager extends AbstractService {
   @Override
   protected void serviceStop() throws Exception {
     if (collectors != null && collectors.size() > 1) {
-      for (TimelineCollector c : collectors.values()) {
-        c.serviceStop();
+      synchronized (collectors) {
+        for (TimelineCollector c : collectors.values()) {
+          c.serviceStop();
+        }
       }
     }
     // stop the flusher first
@@ -243,7 +261,12 @@ public class TimelineCollectorManager extends AbstractService {
 
     public void run() {
       try {
-        writer.flush();
+        // synchronize on the writer object to avoid flushing timeline
+        // entities placed on the buffer by synchronous putEntities
+        // requests.
+        synchronized (writer) {
+          writer.flush();
+        }
       } catch (Throwable th) {
         // we need to handle all exceptions or subsequent execution may be
         // suppressed

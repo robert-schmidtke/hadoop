@@ -39,9 +39,11 @@ import org.apache.hadoop.yarn.api.records.FinalApplicationStatus;
 import org.apache.hadoop.yarn.api.records.NodeReport;
 import org.apache.hadoop.yarn.api.records.Priority;
 import org.apache.hadoop.yarn.api.records.Resource;
+import org.apache.hadoop.yarn.api.records.UpdateContainerRequest;
+import org.apache.hadoop.yarn.api.records.UpdatedContainer;
 import org.apache.hadoop.yarn.client.api.AMRMClient;
 import org.apache.hadoop.yarn.client.api.AMRMClient.ContainerRequest;
-import org.apache.hadoop.yarn.client.api.TimelineClient;
+import org.apache.hadoop.yarn.client.api.TimelineV2Client;
 import org.apache.hadoop.yarn.client.api.async.AMRMClientAsync;
 import org.apache.hadoop.yarn.client.api.impl.AMRMClientImpl;
 import org.apache.hadoop.yarn.exceptions.ApplicationAttemptNotFoundException;
@@ -60,7 +62,7 @@ extends AMRMClientAsync<T> {
   private final HeartbeatThread heartbeatThread;
   private final CallbackHandlerThread handlerThread;
 
-  private final BlockingQueue<AllocateResponse> responseQueue;
+  private final BlockingQueue<Object> responseQueue;
   
   private final Object unregisterHeartbeatLock = new Object();
   
@@ -68,8 +70,6 @@ extends AMRMClientAsync<T> {
   private volatile float progress;
   
   private volatile String collectorAddr;
-
-  private volatile Throwable savedException;
 
   /**
    *
@@ -89,7 +89,6 @@ extends AMRMClientAsync<T> {
     handlerThread = new CallbackHandlerThread();
     responseQueue = new LinkedBlockingQueue<>();
     keepRunning = true;
-    savedException = null;
   }
 
   /**
@@ -110,9 +109,8 @@ extends AMRMClientAsync<T> {
     super(client, intervalMs, callbackHandler);
     heartbeatThread = new HeartbeatThread();
     handlerThread = new CallbackHandlerThread();
-    responseQueue = new LinkedBlockingQueue<AllocateResponse>();
+    responseQueue = new LinkedBlockingQueue<Object>();
     keepRunning = true;
-    savedException = null;
   }
 
   @Override
@@ -210,9 +208,9 @@ extends AMRMClientAsync<T> {
   }
 
   @Override
-  public void requestContainerResourceChange(
-      Container container, Resource capability) {
-    client.requestContainerResourceChange(container, capability);
+  public void requestContainerUpdate(Container container,
+      UpdateContainerRequest updateContainerRequest) {
+    client.requestContainerUpdate(container, updateContainerRequest);
   }
 
   /**
@@ -264,7 +262,7 @@ extends AMRMClientAsync<T> {
     
     public void run() {
       while (true) {
-        AllocateResponse response = null;
+        Object response = null;
         // synchronization ensures we don't send heartbeats after unregistering
         synchronized (unregisterHeartbeatLock) {
           if (!keepRunning) {
@@ -279,10 +277,7 @@ extends AMRMClientAsync<T> {
             return;
           } catch (Throwable ex) {
             LOG.error("Exception on heartbeat", ex);
-            savedException = ex;
-            // interrupt handler thread in case it waiting on the queue
-            handlerThread.interrupt();
-            return;
+            response = ex;
           }
           if (response != null) {
             while (true) {
@@ -315,21 +310,24 @@ extends AMRMClientAsync<T> {
           return;
         }
         try {
-          AllocateResponse response;
-          if(savedException != null) {
-            LOG.error("Stopping callback due to: ", savedException);
-            handler.onError(savedException);
-            return;
-          }
+          Object object;
           try {
-            response = responseQueue.take();
+            object = responseQueue.take();
           } catch (InterruptedException ex) {
-            LOG.info("Interrupted while waiting for queue", ex);
+            LOG.debug("Interrupted while waiting for queue", ex);
+            Thread.currentThread().interrupt();
+            continue;
+          }
+          if (object instanceof Throwable) {
+            progress = handler.getProgress();
+            handler.onError((Throwable) object);
             continue;
           }
 
+          AllocateResponse response = (AllocateResponse) object;
           String collectorAddress = response.getCollectorAddr();
-          TimelineClient timelineClient = client.getRegisteredTimeineClient();
+          TimelineV2Client timelineClient =
+              client.getRegisteredTimelineV2Client();
           if (timelineClient != null && collectorAddress != null
               && !collectorAddress.isEmpty()) {
             if (collectorAddr == null
@@ -354,12 +352,11 @@ extends AMRMClientAsync<T> {
           if (handler instanceof AMRMClientAsync.AbstractCallbackHandler) {
             // RM side of the implementation guarantees that there are
             // no duplications between increased and decreased containers
-            List<Container> changed = new ArrayList<>();
-            changed.addAll(response.getIncreasedContainers());
-            changed.addAll(response.getDecreasedContainers());
+            List<UpdatedContainer> changed = new ArrayList<>();
+            changed.addAll(response.getUpdatedContainers());
             if (!changed.isEmpty()) {
               ((AMRMClientAsync.AbstractCallbackHandler) handler)
-                  .onContainersResourceChanged(changed);
+                  .onContainersUpdated(changed);
             }
           }
 

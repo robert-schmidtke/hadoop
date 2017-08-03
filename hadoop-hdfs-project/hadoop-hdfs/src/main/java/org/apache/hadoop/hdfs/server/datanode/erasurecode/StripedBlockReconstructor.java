@@ -21,6 +21,7 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 
 import org.apache.hadoop.classification.InterfaceAudience;
+import org.apache.hadoop.hdfs.server.datanode.metrics.DataNodeMetrics;
 
 /**
  * StripedBlockReconstructor reconstruct one or more missed striped block in
@@ -47,8 +48,9 @@ class StripedBlockReconstructor extends StripedReconstructor
 
   @Override
   public void run() {
-    getDatanode().incrementXmitsInProgress();
     try {
+      initDecoderIfNecessary();
+
       getStripedReader().init();
 
       stripedWriter.init();
@@ -63,10 +65,15 @@ class StripedBlockReconstructor extends StripedReconstructor
       LOG.warn("Failed to reconstruct striped block: {}", getBlockGroup(), e);
       getDatanode().getMetrics().incrECFailedReconstructionTasks();
     } finally {
-      getDatanode().decrementXmitsInProgress();
-      getDatanode().getMetrics().incrECReconstructionTasks();
+      getDatanode().decrementXmitsInProgress(getXmits());
+      final DataNodeMetrics metrics = getDatanode().getMetrics();
+      metrics.incrECReconstructionTasks();
+      metrics.incrECReconstructionBytesRead(getBytesRead());
+      metrics.incrECReconstructionRemoteBytesRead(getRemoteBytesRead());
+      metrics.incrECReconstructionBytesWritten(getBytesWritten());
       getStripedReader().close();
       stripedWriter.close();
+      cleanup();
     }
   }
 
@@ -96,14 +103,15 @@ class StripedBlockReconstructor extends StripedReconstructor
   }
 
   private void reconstructTargets(int toReconstructLen) {
-    initDecoderIfNecessary();
-
     ByteBuffer[] inputs = getStripedReader().getInputBuffers(toReconstructLen);
 
     int[] erasedIndices = stripedWriter.getRealTargetIndices();
     ByteBuffer[] outputs = stripedWriter.getRealTargetBuffers(toReconstructLen);
 
+    long start = System.nanoTime();
     getDecoder().decode(inputs, erasedIndices, outputs);
+    long end = System.nanoTime();
+    this.getDatanode().getMetrics().incrECDecodingTime(end - start);
 
     stripedWriter.updateRealTargetBuffers(toReconstructLen);
   }

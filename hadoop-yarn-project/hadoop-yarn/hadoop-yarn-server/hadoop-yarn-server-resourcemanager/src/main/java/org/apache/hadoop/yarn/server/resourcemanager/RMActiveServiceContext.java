@@ -38,23 +38,24 @@ import org.apache.hadoop.yarn.server.resourcemanager.recovery.RMStateStore;
 import org.apache.hadoop.yarn.server.resourcemanager.reservation.ReservationSystem;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMApp;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.AMLivelinessMonitor;
+import org.apache.hadoop.yarn.server.resourcemanager.rmapp.monitor.RMAppLifetimeMonitor;
 import org.apache.hadoop.yarn.server.resourcemanager.rmcontainer.ContainerAllocationExpirer;
 import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNode;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.ResourceScheduler;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.distributed.QueueLimitCalculator;
 import org.apache.hadoop.yarn.server.resourcemanager.security.AMRMTokenSecretManager;
 import org.apache.hadoop.yarn.server.resourcemanager.security.ClientToAMTokenSecretManagerInRM;
 import org.apache.hadoop.yarn.server.resourcemanager.security.DelegationTokenRenewer;
 import org.apache.hadoop.yarn.server.resourcemanager.security.NMTokenSecretManagerInRM;
 import org.apache.hadoop.yarn.server.resourcemanager.security.RMContainerTokenSecretManager;
 import org.apache.hadoop.yarn.server.resourcemanager.security.RMDelegationTokenSecretManager;
-import org.apache.hadoop.yarn.server.resourcemanager.timelineservice.RMTimelineCollectorManager;
 import org.apache.hadoop.yarn.util.Clock;
 import org.apache.hadoop.yarn.util.SystemClock;
 
 /**
- * The RMActiveServiceContext is the class that maintains all the
- * RMActiveService contexts.This is expected to be used only by ResourceManager
- * and RMContext.
+ * The RMActiveServiceContext is the class that maintains <b>Active</b> service
+ * context. Services that need to run only on the Active RM. This is expected to
+ * be used only by RMContext.
  */
 @Private
 @Unstable
@@ -93,7 +94,6 @@ public class RMActiveServiceContext {
   private NodesListManager nodesListManager;
   private ResourceTrackerService resourceTrackerService;
   private ApplicationMasterService applicationMasterService;
-  private RMTimelineCollectorManager timelineCollectorManager;
 
   private RMNodeLabelsManager nodeLabelManager;
   private RMDelegatedNodeLabelsUpdater rmDelegatedNodeLabelsUpdater;
@@ -104,6 +104,9 @@ public class RMActiveServiceContext {
   private boolean printLog = true;
   private boolean isSchedulerReady = false;
   private PlacementManager queuePlacementManager = null;
+
+  private RMAppLifetimeMonitor rmAppLifetimeMonitor;
+  private QueueLimitCalculator queueLimitCalculator;
 
   public RMActiveServiceContext() {
     queuePlacementManager = new PlacementManager();
@@ -371,19 +374,6 @@ public class RMActiveServiceContext {
 
   @Private
   @Unstable
-  public RMTimelineCollectorManager getRMTimelineCollectorManager() {
-    return timelineCollectorManager;
-  }
-
-  @Private
-  @Unstable
-  public void setRMTimelineCollectorManager(
-      RMTimelineCollectorManager collectorManager) {
-    this.timelineCollectorManager = collectorManager;
-  }
-
-  @Private
-  @Unstable
   public long getEpoch() {
     return this.epoch;
   }
@@ -466,5 +456,31 @@ public class RMActiveServiceContext {
   @Unstable
   public void setQueuePlacementManager(PlacementManager placementMgr) {
     this.queuePlacementManager = placementMgr;
+  }
+
+  @Private
+  @Unstable
+  public void setRMAppLifetimeMonitor(
+      RMAppLifetimeMonitor lifetimeMonitor) {
+    this.rmAppLifetimeMonitor = lifetimeMonitor;
+  }
+
+  @Private
+  @Unstable
+  public RMAppLifetimeMonitor getRMAppLifetimeMonitor() {
+    return this.rmAppLifetimeMonitor;
+  }
+
+  @Private
+  @Unstable
+  public QueueLimitCalculator getNodeManagerQueueLimitCalculator() {
+    return this.queueLimitCalculator;
+  }
+
+  @Private
+  @Unstable
+  public void setContainerQueueLimitCalculator(
+      QueueLimitCalculator limitCalculator) {
+    this.queueLimitCalculator = limitCalculator;
   }
 }

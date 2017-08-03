@@ -14,6 +14,7 @@
 package org.apache.hadoop.security.authentication.client;
 
 import org.apache.commons.codec.binary.Base64;
+import org.apache.hadoop.security.authentication.server.HttpConstants;
 import org.apache.hadoop.security.authentication.util.AuthToken;
 import org.apache.hadoop.security.authentication.util.KerberosUtil;
 import org.ietf.jgss.GSSContext;
@@ -57,17 +58,18 @@ public class KerberosAuthenticator implements Authenticator {
   /**
    * HTTP header used by the SPNEGO server endpoint during an authentication sequence.
    */
-  public static final String WWW_AUTHENTICATE = "WWW-Authenticate";
+  public static final String WWW_AUTHENTICATE =
+      HttpConstants.WWW_AUTHENTICATE_HEADER;
 
   /**
    * HTTP header used by the SPNEGO client endpoint during an authentication sequence.
    */
-  public static final String AUTHORIZATION = "Authorization";
+  public static final String AUTHORIZATION = HttpConstants.AUTHORIZATION_HEADER;
 
   /**
    * HTTP header prefix used by the SPNEGO client/server endpoints during an authentication sequence.
    */
-  public static final String NEGOTIATE = "Negotiate";
+  public static final String NEGOTIATE = HttpConstants.NEGOTIATE;
 
   private static final String AUTH_HTTP_METHOD = "OPTIONS";
 
@@ -291,10 +293,10 @@ public class KerberosAuthenticator implements Authenticator {
             GSSManager gssManager = GSSManager.getInstance();
             String servicePrincipal = KerberosUtil.getServicePrincipal("HTTP",
                 KerberosAuthenticator.this.url.getHost());
-            Oid oid = KerberosUtil.getOidInstance("NT_GSS_KRB5_PRINCIPAL");
+            Oid oid = KerberosUtil.NT_GSS_KRB5_PRINCIPAL_OID;
             GSSName serviceName = gssManager.createName(servicePrincipal,
                                                         oid);
-            oid = KerberosUtil.getOidInstance("GSS_KRB5_MECH_OID");
+            oid = KerberosUtil.GSS_KRB5_MECH_OID;
             gssContext = gssManager.createContext(serviceName, oid, null,
                                                   GSSContext.DEFAULT_LIFETIME);
             gssContext.requestCredDeleg(true);

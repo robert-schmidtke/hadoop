@@ -216,8 +216,8 @@ public class TestSafeMode {
     GenericTestUtils.waitFor(new Supplier<Boolean>() {
       @Override
       public Boolean get() {
-        return getLongCounter("StorageBlockReportOps", getMetrics(NN_METRICS)) ==
-            cluster.getStoragesPerDatanode();
+        return getLongCounter("StorageBlockReportNumOps",
+            getMetrics(NN_METRICS)) == cluster.getStoragesPerDatanode();
       }
     }, 10, 10000);
 
@@ -301,6 +301,30 @@ public class TestSafeMode {
     } catch (SafeModeException ignored) {
     } catch (IOException ioe) {
       fail(msg + " " + StringUtils.stringifyException(ioe));
+    }
+  }
+
+  @Test
+  public void testSafeModeExceptionText() throws Exception {
+    final Path file1 = new Path("/file1");
+    DFSTestUtil.createFile(fs, file1, 1024, (short)1, 0);
+    assertTrue("Could not enter SM",
+        dfs.setSafeMode(SafeModeAction.SAFEMODE_ENTER));
+    try {
+      FSRun fsRun = new FSRun() {
+        @Override
+        public void run(FileSystem fileSystem) throws IOException {
+          ((DistributedFileSystem)fileSystem).setQuota(file1, 1, 1);
+        }
+      };
+      fsRun.run(fs);
+      fail("Should not succeed with no exceptions!");
+    } catch (RemoteException re) {
+      assertEquals(SafeModeException.class.getName(), re.getClassName());
+      GenericTestUtils.assertExceptionContains(
+          NameNode.getServiceAddress(conf, true).getHostName(), re);
+    } catch (IOException ioe) {
+      fail("Encountered exception" + " " + StringUtils.stringifyException(ioe));
     }
   }
 
@@ -482,6 +506,7 @@ public class TestSafeMode {
    * Tests some utility methods that surround the SafeMode's state.
    * @throws IOException when there's an issue connecting to the test DFS.
    */
+  @Test
   public void testSafeModeUtils() throws IOException {
     dfs = cluster.getFileSystem();
 

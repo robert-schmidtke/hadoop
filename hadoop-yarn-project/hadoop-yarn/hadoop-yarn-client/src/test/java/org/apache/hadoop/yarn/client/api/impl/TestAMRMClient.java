@@ -33,13 +33,14 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Set;
 import java.util.TreeSet;
 
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.fs.CommonConfigurationKeys;
+import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
 import org.apache.hadoop.io.DataOutputBuffer;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.security.Credentials;
@@ -51,27 +52,7 @@ import org.apache.hadoop.yarn.api.ApplicationMasterProtocol;
 import org.apache.hadoop.yarn.api.protocolrecords.AllocateRequest;
 import org.apache.hadoop.yarn.api.protocolrecords.AllocateResponse;
 import org.apache.hadoop.yarn.api.protocolrecords.SubmitApplicationRequest;
-import org.apache.hadoop.yarn.api.records.ApplicationAccessType;
-import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
-import org.apache.hadoop.yarn.api.records.ApplicationId;
-import org.apache.hadoop.yarn.api.records.ApplicationReport;
-import org.apache.hadoop.yarn.api.records.ApplicationSubmissionContext;
-import org.apache.hadoop.yarn.api.records.Container;
-import org.apache.hadoop.yarn.api.records.ContainerId;
-import org.apache.hadoop.yarn.api.records.ContainerLaunchContext;
-import org.apache.hadoop.yarn.api.records.ContainerState;
-import org.apache.hadoop.yarn.api.records.ContainerStatus;
-import org.apache.hadoop.yarn.api.records.ExecutionType;
-import org.apache.hadoop.yarn.api.records.FinalApplicationStatus;
-import org.apache.hadoop.yarn.api.records.LocalResource;
-import org.apache.hadoop.yarn.api.records.NMToken;
-import org.apache.hadoop.yarn.api.records.NodeReport;
-import org.apache.hadoop.yarn.api.records.NodeState;
-import org.apache.hadoop.yarn.api.records.Priority;
-import org.apache.hadoop.yarn.api.records.Resource;
-import org.apache.hadoop.yarn.api.records.ResourceRequest;
-import org.apache.hadoop.yarn.api.records.Token;
-import org.apache.hadoop.yarn.api.records.YarnApplicationState;
+import org.apache.hadoop.yarn.api.records.*;
 import org.apache.hadoop.yarn.client.ClientRMProxy;
 import org.apache.hadoop.yarn.client.api.AMRMClient;
 import org.apache.hadoop.yarn.client.api.AMRMClient.ContainerRequest;
@@ -84,47 +65,75 @@ import org.apache.hadoop.yarn.exceptions.YarnException;
 import org.apache.hadoop.yarn.ipc.YarnRPC;
 import org.apache.hadoop.yarn.security.AMRMTokenIdentifier;
 import org.apache.hadoop.yarn.server.MiniYARNCluster;
+import org.apache.hadoop.yarn.server.resourcemanager.RMContext;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.RMAppAttempt;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.RMAppAttemptState;
+import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNode;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.CapacityScheduler;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.event.NodeUpdateSchedulerEvent;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.fair.FairScheduler;
 import org.apache.hadoop.yarn.server.resourcemanager.security.AMRMTokenSecretManager;
 import org.apache.hadoop.yarn.server.utils.BuilderUtils;
 import org.apache.hadoop.yarn.util.Records;
 import org.junit.After;
-import org.junit.AfterClass;
 import org.junit.Assert;
+import org.junit.Assume;
 import org.junit.Before;
-import org.junit.BeforeClass;
 import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.junit.runners.Parameterized;
 import org.mockito.invocation.InvocationOnMock;
 import org.mockito.stubbing.Answer;
-import org.mortbay.log.Log;
+import org.eclipse.jetty.util.log.Log;
 
 import com.google.common.base.Supplier;
 
+/**
+ * Test application master client class to resource manager.
+ */
+@RunWith(value = Parameterized.class)
 public class TestAMRMClient {
-  static Configuration conf = null;
-  static MiniYARNCluster yarnCluster = null;
-  static YarnClient yarnClient = null;
-  static List<NodeReport> nodeReports = null;
-  static ApplicationAttemptId attemptId = null;
-  static int nodeCount = 3;
+  private String schedulerName = null;
+  private Configuration conf = null;
+  private MiniYARNCluster yarnCluster = null;
+  private YarnClient yarnClient = null;
+  private List<NodeReport> nodeReports = null;
+  private ApplicationAttemptId attemptId = null;
+  private int nodeCount = 3;
   
   static final int rolling_interval_sec = 13;
   static final long am_expire_ms = 4000;
 
-  static Resource capability;
-  static Priority priority;
-  static Priority priority2;
-  static String node;
-  static String rack;
-  static String[] nodes;
-  static String[] racks;
+  private Resource capability;
+  private Priority priority;
+  private Priority priority2;
+  private String node;
+  private String rack;
+  private String[] nodes;
+  private String[] racks;
   private final static int DEFAULT_ITERATION = 3;
-  
-  @BeforeClass
-  public static void setup() throws Exception {
-    // start minicluster
+
+  public TestAMRMClient(String schedulerName) {
+    this.schedulerName = schedulerName;
+  }
+
+  @Parameterized.Parameters
+  public static Collection<Object[]> data() {
+    List<Object[]> list = new ArrayList<Object[]>(2);
+    list.add(new Object[] {CapacityScheduler.class.getName()});
+    list.add(new Object[] {FairScheduler.class.getName()});
+    return list;
+  }
+
+  @Before
+  public void setup() throws Exception {
     conf = new YarnConfiguration();
+    createClusterAndStartApplication();
+  }
+
+  private void createClusterAndStartApplication() throws Exception {
+    // start minicluster
+    conf.set(YarnConfiguration.RM_SCHEDULER, schedulerName);
     conf.setLong(
       YarnConfiguration.RM_AMRM_TOKEN_MASTER_KEY_ROLLING_INTERVAL_SECS,
       rolling_interval_sec);
@@ -143,8 +152,13 @@ public class TestAMRMClient {
     yarnClient.start();
 
     // get node info
+    assertTrue("All node managers did not connect to the RM within the "
+        + "allotted 5-second timeout",
+        yarnCluster.waitForNodeManagersToConnect(5000L));
     nodeReports = yarnClient.getNodeReports(NodeState.RUNNING);
-    
+    assertEquals("Not all node managers were reported running",
+        nodeCount, nodeReports.size());
+
     priority = Priority.newInstance(1);
     priority2 = Priority.newInstance(2);
     capability = Resource.newInstance(1024, 1);
@@ -153,10 +167,7 @@ public class TestAMRMClient {
     rack = nodeReports.get(0).getRackName();
     nodes = new String[]{ node };
     racks = new String[]{ rack };
-  }
-  
-  @Before
-  public void startApp() throws Exception {
+
     // submit new app
     ApplicationSubmissionContext appContext = 
         yarnClient.createApplication().getApplicationSubmissionContext();
@@ -214,19 +225,30 @@ public class TestAMRMClient {
   }
   
   @After
-  public void cancelApp() throws YarnException, IOException {
+  public void teardown() throws YarnException, IOException {
     yarnClient.killApplication(attemptId.getApplicationId());
     attemptId = null;
-  }
-  
-  @AfterClass
-  public static void tearDown() {
+
     if (yarnClient != null && yarnClient.getServiceState() == STATE.STARTED) {
       yarnClient.stop();
     }
     if (yarnCluster != null && yarnCluster.getServiceState() == STATE.STARTED) {
       yarnCluster.stop();
     }
+  }
+
+  @Test (timeout = 60000)
+  public void testAMRMClientNoMatchingRequests()
+      throws IOException, YarnException {
+    AMRMClient<ContainerRequest> amClient =  AMRMClient.createAMRMClient();
+    amClient.init(conf);
+    amClient.start();
+    amClient.registerApplicationMaster("Host", 10000, "");
+
+    Resource testCapability1 = Resource.newInstance(1024,  2);
+    List<? extends Collection<ContainerRequest>> matches =
+        amClient.getMatchingRequests(priority, node, testCapability1);
+    assertEquals("Expected no matching requests.", matches.size(), 0);
   }
   
   @Test (timeout=60000)
@@ -268,6 +290,18 @@ public class TestAMRMClient {
       amClient.addContainerRequest(storedContainer5);
       amClient.addContainerRequest(storedContainer6);
       amClient.addContainerRequest(storedContainer7);
+
+      // Add some CRs with allocReqIds... These will not be returned by
+      // the default getMatchingRequests
+      ContainerRequest storedContainer11 =
+          new ContainerRequest(capability1, nodes, racks, priority, 1);
+      ContainerRequest storedContainer33 =
+          new ContainerRequest(capability3, nodes, racks, priority, 3);
+      ContainerRequest storedContainer43 =
+          new ContainerRequest(capability4, nodes, racks, priority, 3);
+      amClient.addContainerRequest(storedContainer11);
+      amClient.addContainerRequest(storedContainer33);
+      amClient.addContainerRequest(storedContainer43);
       
       // test matching of containers
       List<? extends Collection<ContainerRequest>> matches;
@@ -279,6 +313,25 @@ public class TestAMRMClient {
       storedRequest = matches.get(0).iterator().next();
       assertEquals(storedContainer1, storedRequest);
       amClient.removeContainerRequest(storedContainer1);
+
+      // exact match for allocReqId 1
+      Collection<ContainerRequest> reqIdMatches =
+          amClient.getMatchingRequests(1);
+      assertEquals(1, reqIdMatches.size());
+      storedRequest = reqIdMatches.iterator().next();
+      assertEquals(storedContainer11, storedRequest);
+      amClient.removeContainerRequest(storedContainer11);
+
+      // exact match for allocReqId 3
+      reqIdMatches = amClient.getMatchingRequests(3);
+      assertEquals(2, reqIdMatches.size());
+      Iterator<ContainerRequest> iter = reqIdMatches.iterator();
+      storedRequest = iter.next();
+      assertEquals(storedContainer43, storedRequest);
+      amClient.removeContainerRequest(storedContainer43);
+      storedRequest = iter.next();
+      assertEquals(storedContainer33, storedRequest);
+      amClient.removeContainerRequest(storedContainer33);
       
       // exact matching with order maintained
       Resource testCapability2 = Resource.newInstance(2000, 1);
@@ -326,6 +379,139 @@ public class TestAMRMClient {
       matches = amClient.getMatchingRequests(priority2, node, testCapability7);
       assert(matches.size() == 1);
       
+      amClient.unregisterApplicationMaster(FinalApplicationStatus.SUCCEEDED,
+          null, null);
+
+    } finally {
+      if (amClient != null && amClient.getServiceState() == STATE.STARTED) {
+        amClient.stop();
+      }
+    }
+  }
+
+  /**
+   * Test fit of both GUARANTEED and OPPORTUNISTIC containers.
+   */
+  @Test (timeout=60000)
+  public void testAMRMClientMatchingFitExecType()
+      throws YarnException, IOException {
+    AMRMClient<ContainerRequest> amClient = null;
+    try {
+      // start am rm client
+      amClient = AMRMClient.<ContainerRequest>createAMRMClient();
+      amClient.init(conf);
+      amClient.start();
+      amClient.registerApplicationMaster("Host", 10000, "");
+
+      Resource capability1 = Resource.newInstance(1024, 2);
+      Resource capability2 = Resource.newInstance(1024, 1);
+      Resource capability3 = Resource.newInstance(1000, 2);
+      Resource capability4 = Resource.newInstance(1000, 2);
+      Resource capability5 = Resource.newInstance(2000, 2);
+      Resource capability6 = Resource.newInstance(2000, 3);
+      Resource capability7 = Resource.newInstance(6000, 3);
+
+      // Add 2 GUARANTEED and 7 OPPORTUNISTIC requests.
+      ContainerRequest storedGuarContainer1 =
+          new ContainerRequest(capability1, nodes, racks, priority);
+      ContainerRequest storedGuarContainer2 =
+          new ContainerRequest(capability2, nodes, racks, priority);
+      ContainerRequest storedOpportContainer1 =
+          new ContainerRequest(capability1, nodes, racks, priority,
+              0, true, null,
+              ExecutionTypeRequest.newInstance(ExecutionType.OPPORTUNISTIC));
+      ContainerRequest storedOpportContainer2 =
+          new ContainerRequest(capability2, nodes, racks, priority,
+              0, true, null,
+              ExecutionTypeRequest.newInstance(ExecutionType.OPPORTUNISTIC));
+      ContainerRequest storedOpportContainer3 =
+          new ContainerRequest(capability3, nodes, racks, priority,
+              0, true, null,
+              ExecutionTypeRequest.newInstance(ExecutionType.OPPORTUNISTIC));
+      ContainerRequest storedOpportContainer4 =
+          new ContainerRequest(capability4, nodes, racks, priority,
+              0, true, null,
+              ExecutionTypeRequest.newInstance(ExecutionType.OPPORTUNISTIC));
+      ContainerRequest storedOpportContainer5 =
+          new ContainerRequest(capability5, nodes, racks, priority,
+              0, true, null,
+              ExecutionTypeRequest.newInstance(ExecutionType.OPPORTUNISTIC));
+      ContainerRequest storedOpportContainer6 =
+          new ContainerRequest(capability6, nodes, racks, priority,
+              0, true, null,
+              ExecutionTypeRequest.newInstance(ExecutionType.OPPORTUNISTIC));
+      ContainerRequest storedOpportContainer7 =
+          new ContainerRequest(capability7, nodes, racks, priority2,
+              0, false, null,
+              ExecutionTypeRequest.newInstance(ExecutionType.OPPORTUNISTIC));
+      amClient.addContainerRequest(storedGuarContainer1);
+      amClient.addContainerRequest(storedGuarContainer2);
+      amClient.addContainerRequest(storedOpportContainer1);
+      amClient.addContainerRequest(storedOpportContainer2);
+      amClient.addContainerRequest(storedOpportContainer3);
+      amClient.addContainerRequest(storedOpportContainer4);
+      amClient.addContainerRequest(storedOpportContainer5);
+      amClient.addContainerRequest(storedOpportContainer6);
+      amClient.addContainerRequest(storedOpportContainer7);
+
+      // Make sure 3 entries are generated in the ask list for each added
+      // container request of a given capability, locality, execution type and
+      // priority (one node-local, one rack-local, and one ANY).
+      assertEquals(24,
+          (((AMRMClientImpl<ContainerRequest>) amClient).ask.size()));
+
+      // test exact matching of GUARANTEED containers
+      List<? extends Collection<ContainerRequest>> matches;
+      ContainerRequest storedRequest;
+      Resource testCapability1 = Resource.newInstance(1024,  2);
+      matches = amClient
+          .getMatchingRequests(priority, node, ExecutionType.GUARANTEED,
+              testCapability1);
+      verifyMatches(matches, 1);
+      storedRequest = matches.get(0).iterator().next();
+      assertEquals(storedGuarContainer1, storedRequest);
+      amClient.removeContainerRequest(storedGuarContainer1);
+
+      // test exact matching of OPPORTUNISTIC containers
+      matches = amClient.getMatchingRequests(priority, node,
+          ExecutionType.OPPORTUNISTIC, testCapability1);
+      verifyMatches(matches, 1);
+      storedRequest = matches.get(0).iterator().next();
+      assertEquals(storedOpportContainer1, storedRequest);
+      amClient.removeContainerRequest(storedOpportContainer1);
+
+      // exact OPPORTUNISTIC matching with order maintained
+      Resource testCapability2 = Resource.newInstance(1000, 2);
+      matches = amClient.getMatchingRequests(priority, node,
+          ExecutionType.OPPORTUNISTIC, testCapability2);
+      verifyMatches(matches, 2);
+      // must be returned in the order they were made
+      int i = 0;
+      for(ContainerRequest storedRequest1 : matches.get(0)) {
+        if(i++ == 0) {
+          assertEquals(storedOpportContainer3, storedRequest1);
+        } else {
+          assertEquals(storedOpportContainer4, storedRequest1);
+        }
+      }
+      amClient.removeContainerRequest(storedOpportContainer3);
+
+      // matching with larger container
+      Resource testCapability3 = Resource.newInstance(4000, 4);
+      matches = amClient.getMatchingRequests(priority, node,
+          ExecutionType.OPPORTUNISTIC, testCapability3);
+      assert(matches.size() == 4);
+
+      // verify requests without relaxed locality are only returned at specific
+      // locations
+      Resource testCapability4 = Resource.newInstance(6000, 3);
+      matches = amClient.getMatchingRequests(priority2, ResourceRequest.ANY,
+          ExecutionType.OPPORTUNISTIC, testCapability4);
+      assert(matches.size() == 0);
+      matches = amClient.getMatchingRequests(priority2, node,
+          ExecutionType.OPPORTUNISTIC, testCapability4);
+      assert(matches.size() == 1);
+
       amClient.unregisterApplicationMaster(FinalApplicationStatus.SUCCEEDED,
           null, null);
 
@@ -414,11 +600,13 @@ public class TestAMRMClient {
       amClient.addContainerRequest(storedContainer3);
       
       // test addition and storage
-      int containersRequestedAny = amClient.remoteRequestsTable.get(priority,
+      RemoteRequestsTable<ContainerRequest> remoteRequestsTable =
+          amClient.getTable(0);
+      int containersRequestedAny = remoteRequestsTable.get(priority,
           ResourceRequest.ANY, ExecutionType.GUARANTEED, capability)
           .remoteRequest.getNumContainers();
       assertEquals(2, containersRequestedAny);
-      containersRequestedAny = amClient.remoteRequestsTable.get(priority1,
+      containersRequestedAny = remoteRequestsTable.get(priority1,
           ResourceRequest.ANY, ExecutionType.GUARANTEED, capability)
           .remoteRequest.getNumContainers();
          assertEquals(1, containersRequestedAny);
@@ -457,7 +645,7 @@ public class TestAMRMClient {
           amClient.getMatchingRequests(priority1, ResourceRequest.ANY, capability);
       assertTrue(matches.isEmpty());
       // 0 requests left. everything got cleaned up
-      assertTrue(amClient.remoteRequestsTable.isEmpty());
+      assertTrue(amClient.getTable(0).isEmpty());
       
       // go through an exemplary allocation, matching and release cycle
       amClient.addContainerRequest(storedContainer1);
@@ -467,7 +655,8 @@ public class TestAMRMClient {
       int iterationsLeft = 3;
       while (allocatedContainerCount < 2
           && iterationsLeft-- > 0) {
-        Log.info(" == alloc " + allocatedContainerCount + " it left " + iterationsLeft);
+        Log.getLog().info("Allocated " + allocatedContainerCount + " containers"
+            + " with " + iterationsLeft + " iterations left");
         AllocateResponse allocResponse = amClient.allocate(0.1f);
         assertEquals(0, amClient.ask.size());
         assertEquals(0, amClient.release.size());
@@ -490,8 +679,8 @@ public class TestAMRMClient {
           amClient.releaseAssignedContainer(container.getId());
         }
         if(allocatedContainerCount < containersRequestedAny) {
-          // sleep to let NM's heartbeat to RM and trigger allocations
-          sleep(100);
+          // let NM heartbeat to RM and trigger allocations
+          triggerSchedulingWithNMHeartBeat();
         }
       }
       
@@ -501,7 +690,7 @@ public class TestAMRMClient {
       assertEquals(0, amClient.ask.size());
       assertEquals(0, allocResponse.getAllocatedContainers().size());
       // 0 requests left. everything got cleaned up
-      assertTrue(amClient.remoteRequestsTable.isEmpty());      
+      assertTrue(remoteRequestsTable.isEmpty());
       
       amClient.unregisterApplicationMaster(FinalApplicationStatus.SUCCEEDED,
           null, null);
@@ -512,7 +701,27 @@ public class TestAMRMClient {
       }
     }
   }
-  
+
+  /**
+   * Make sure we get allocations regardless of timing issues.
+   */
+  private void triggerSchedulingWithNMHeartBeat() {
+    // Simulate fair scheduler update thread
+    RMContext context = yarnCluster.getResourceManager().getRMContext();
+    if (context.getScheduler() instanceof FairScheduler) {
+      FairScheduler scheduler = (FairScheduler)context.getScheduler();
+      scheduler.update();
+    }
+    // Trigger NM's heartbeat to RM and trigger allocations
+    for (RMNode rmNode : context.getRMNodes().values()) {
+      context.getScheduler().handle(new NodeUpdateSchedulerEvent(rmNode));
+    }
+    if (context.getScheduler() instanceof FairScheduler) {
+      FairScheduler scheduler = (FairScheduler)context.getScheduler();
+      scheduler.update();
+    }
+  }
+
   @Test (timeout=60000)
   public void testAllocationWithBlacklist() throws YarnException, IOException {
     AMRMClientImpl<ContainerRequest> amClient = null;
@@ -635,7 +844,8 @@ public class TestAMRMClient {
       throws YarnException, IOException {
     int allocatedContainerCount = 0;
     while (iterationsLeft-- > 0) {
-      Log.info(" == alloc " + allocatedContainerCount + " it left " + iterationsLeft);
+      Log.getLog().info("Allocated " + allocatedContainerCount + " containers"
+          + " with " + iterationsLeft + " iterations left");
       AllocateResponse allocResponse = amClient.allocate(0.1f);
       assertEquals(0, amClient.ask.size());
       assertEquals(0, amClient.release.size());
@@ -644,8 +854,8 @@ public class TestAMRMClient {
       allocatedContainerCount += allocResponse.getAllocatedContainers().size();
         
       if(allocatedContainerCount == 0) {
-        // sleep to let NM's heartbeat to RM and trigger allocations
-        sleep(100);
+        // let NM heartbeat to RM and trigger allocations
+        triggerSchedulingWithNMHeartBeat();
       }
     }
     return allocatedContainerCount;
@@ -653,6 +863,27 @@ public class TestAMRMClient {
 
   @Test (timeout=60000)
   public void testAMRMClient() throws YarnException, IOException {
+    initAMRMClientAndTest(false);
+  }
+
+  @Test (timeout=60000)
+  public void testAMRMClientAllocReqId() throws YarnException, IOException {
+    initAMRMClientAndTest(true);
+  }
+
+  @Test (timeout=60000)
+  public void testAMRMClientWithSaslEncryption() throws Exception {
+    // we have to create a new instance of MiniYARNCluster to avoid SASL qop
+    // mismatches between client and server
+    teardown();
+    conf = new YarnConfiguration();
+    conf.set(CommonConfigurationKeysPublic.HADOOP_RPC_PROTECTION, "privacy");
+    createClusterAndStartApplication();
+    initAMRMClientAndTest(false);
+  }
+
+  private void initAMRMClientAndTest(boolean useAllocReqId)
+      throws YarnException, IOException {
     AMRMClient<ContainerRequest> amClient = null;
     try {
       // start am rm client
@@ -669,7 +900,11 @@ public class TestAMRMClient {
 
       amClient.registerApplicationMaster("Host", 10000, "");
 
-      testAllocation((AMRMClientImpl<ContainerRequest>)amClient);
+      if (useAllocReqId) {
+        testAllocRequestId((AMRMClientImpl<ContainerRequest>)amClient);
+      } else {
+        testAllocation((AMRMClientImpl<ContainerRequest>) amClient);
+      }
 
       amClient.unregisterApplicationMaster(FinalApplicationStatus.SUCCEEDED,
           null, null);
@@ -753,6 +988,8 @@ public class TestAMRMClient {
   @Test(timeout=60000)
   public void testAMRMClientWithContainerResourceChange()
       throws YarnException, IOException {
+    // Fair scheduler does not support resource change
+    Assume.assumeTrue(schedulerName.equals(CapacityScheduler.class.getName()));
     AMRMClient<ContainerRequest> amClient = null;
     try {
       // start am rm client
@@ -800,8 +1037,8 @@ public class TestAMRMClient {
     }
     // send allocation requests
     amClient.allocate(0.1f);
-    // sleep to let NM's heartbeat to RM and trigger allocations
-    sleep(150);
+    // let NM heartbeat to RM and trigger allocations
+    triggerSchedulingWithNMHeartBeat();
     // get allocations
     AllocateResponse allocResponse = amClient.allocate(0.1f);
     List<Container> containers = allocResponse.getAllocatedContainers();
@@ -831,14 +1068,14 @@ public class TestAMRMClient {
           if (status.getState() == ContainerState.RUNNING) {
             break;
           }
-          sleep(100);
+          sleep(10);
         }
       }
     } catch (YarnException e) {
       throw new AssertionError("Exception is not expected: " + e);
     }
-    // sleep to let NM's heartbeat to RM to confirm container launch
-    sleep(200);
+    // let NM's heartbeat to RM to confirm container launch
+    triggerSchedulingWithNMHeartBeat();
     return containers;
   }
 
@@ -855,26 +1092,36 @@ public class TestAMRMClient {
         (AMRMClientImpl<ContainerRequest>) amClient;
     Assert.assertEquals(0, amClientImpl.change.size());
     // verify newer request overwrites older request for the container1
-    amClientImpl.requestContainerResourceChange(
-        container1, Resource.newInstance(2048, 1));
-    amClientImpl.requestContainerResourceChange(
-        container1, Resource.newInstance(4096, 1));
+    amClientImpl.requestContainerUpdate(container1,
+        UpdateContainerRequest.newInstance(container1.getVersion(),
+            container1.getId(), ContainerUpdateType.INCREASE_RESOURCE,
+            Resource.newInstance(2048, 1), null));
+    amClientImpl.requestContainerUpdate(container1,
+        UpdateContainerRequest.newInstance(container1.getVersion(),
+            container1.getId(), ContainerUpdateType.INCREASE_RESOURCE,
+            Resource.newInstance(4096, 1), null));
     Assert.assertEquals(Resource.newInstance(4096, 1),
-        amClientImpl.change.get(container1.getId()).getValue());
+        amClientImpl.change.get(container1.getId()).getValue().getCapability());
     // verify new decrease request cancels old increase request for container1
-    amClientImpl.requestContainerResourceChange(
-        container1, Resource.newInstance(512, 1));
+    amClientImpl.requestContainerUpdate(container1,
+        UpdateContainerRequest.newInstance(container1.getVersion(),
+            container1.getId(), ContainerUpdateType.DECREASE_RESOURCE,
+            Resource.newInstance(512, 1), null));
     Assert.assertEquals(Resource.newInstance(512, 1),
-        amClientImpl.change.get(container1.getId()).getValue());
+        amClientImpl.change.get(container1.getId()).getValue().getCapability());
     // request resource increase for container2
-    amClientImpl.requestContainerResourceChange(
-        container2, Resource.newInstance(2048, 1));
+    amClientImpl.requestContainerUpdate(container2,
+        UpdateContainerRequest.newInstance(container2.getVersion(),
+            container2.getId(), ContainerUpdateType.INCREASE_RESOURCE,
+            Resource.newInstance(2048, 1), null));
     Assert.assertEquals(Resource.newInstance(2048, 1),
-        amClientImpl.change.get(container2.getId()).getValue());
+        amClientImpl.change.get(container2.getId()).getValue().getCapability());
     // verify release request will cancel pending change requests for the same
     // container
-    amClientImpl.requestContainerResourceChange(
-        container3, Resource.newInstance(2048, 1));
+    amClientImpl.requestContainerUpdate(container3,
+        UpdateContainerRequest.newInstance(container3.getVersion(),
+            container3.getId(), ContainerUpdateType.INCREASE_RESOURCE,
+            Resource.newInstance(2048, 1), null));
     Assert.assertEquals(3, amClientImpl.pendingChange.size());
     amClientImpl.releaseAssignedContainer(container3.getId());
     Assert.assertEquals(2, amClientImpl.pendingChange.size());
@@ -884,22 +1131,16 @@ public class TestAMRMClient {
     AllocateResponse allocResponse = amClient.allocate(0.1f);
     Assert.assertEquals(0, amClientImpl.change.size());
     // we should get decrease confirmation right away
-    List<Container> decreasedContainers =
-        allocResponse.getDecreasedContainers();
-    List<Container> increasedContainers =
-        allocResponse.getIncreasedContainers();
-    Assert.assertEquals(1, decreasedContainers.size());
-    Assert.assertEquals(0, increasedContainers.size());
+    List<UpdatedContainer> updatedContainers =
+        allocResponse.getUpdatedContainers();
+    Assert.assertEquals(1, updatedContainers.size());
     // we should get increase allocation after the next NM's heartbeat to RM
-    sleep(150);
+    triggerSchedulingWithNMHeartBeat();
     // get allocations
     allocResponse = amClient.allocate(0.1f);
-    decreasedContainers =
-        allocResponse.getDecreasedContainers();
-    increasedContainers =
-        allocResponse.getIncreasedContainers();
-    Assert.assertEquals(1, increasedContainers.size());
-    Assert.assertEquals(0, decreasedContainers.size());
+    updatedContainers =
+        allocResponse.getUpdatedContainers();
+    Assert.assertEquals(1, updatedContainers.size());
   }
 
   private void testAllocation(final AMRMClientImpl<ContainerRequest> amClient)
@@ -921,22 +1162,9 @@ public class TestAMRMClient {
         new ContainerRequest(capability, nodes, racks, priority));
     amClient.removeContainerRequest(
         new ContainerRequest(capability, nodes, racks, priority));
-    
-    int containersRequestedNode = amClient.remoteRequestsTable.get(priority,
-        node, ExecutionType.GUARANTEED, capability).remoteRequest
-        .getNumContainers();
-    int containersRequestedRack = amClient.remoteRequestsTable.get(priority,
-        rack, ExecutionType.GUARANTEED, capability).remoteRequest
-        .getNumContainers();
-    int containersRequestedAny = amClient.remoteRequestsTable.get(priority,
-        ResourceRequest.ANY, ExecutionType.GUARANTEED, capability)
-        .remoteRequest.getNumContainers();
 
-    assertEquals(2, containersRequestedNode);
-    assertEquals(2, containersRequestedRack);
-    assertEquals(2, containersRequestedAny);
-    assertEquals(3, amClient.ask.size());
-    assertEquals(0, amClient.release.size());
+    assertNumContainers(amClient, 0, 2, 2, 2, 3, 0);
+    int containersRequestedAny = 2;
 
     // RM should allocate container within 2 calls to allocate()
     int allocatedContainerCount = 0;
@@ -970,8 +1198,8 @@ public class TestAMRMClient {
       }
       
       if(allocatedContainerCount < containersRequestedAny) {
-        // sleep to let NM's heartbeat to RM and trigger allocations
-        sleep(100);
+        // let NM heartbeat to RM and trigger allocations
+        triggerSchedulingWithNMHeartBeat();
       }
     }
     
@@ -980,7 +1208,7 @@ public class TestAMRMClient {
         && receivedNMTokens.size() <= nodeCount);
     
     assertEquals(allocatedContainerCount, containersRequestedAny);
-    assertEquals(2, amClient.release.size());
+    assertEquals(2, releases.size());
     assertEquals(0, amClient.ask.size());
     
     // need to tell the AMRMClient that we dont need these resources anymore
@@ -1029,10 +1257,15 @@ public class TestAMRMClient {
     // verify that the remove request made in between makeRequest and allocate 
     // has not been lost
     assertEquals(0, snoopRequest.getNumContainers());
-    
-    iterationsLeft = 3;
+
+    waitForContainerCompletion(3, amClient, releases);
+  }
+
+  private void waitForContainerCompletion(int numIterations,
+      AMRMClientImpl<ContainerRequest> amClient, Set<ContainerId> releases)
+      throws YarnException, IOException {
     // do a few iterations to ensure RM is not going send new containers
-    while(!releases.isEmpty() || iterationsLeft-- > 0) {
+    while(!releases.isEmpty() || numIterations-- > 0) {
       // inform RM of rejection
       AllocateResponse allocResponse = amClient.allocate(0.1f);
       // RM did not send new containers because AM does not need any
@@ -1047,13 +1280,105 @@ public class TestAMRMClient {
           }
         }
       }
-      if(iterationsLeft > 0) {
-        // sleep to make sure NM's heartbeat
-        sleep(100);
+      if(numIterations > 0) {
+        // let NM heartbeat to RM and trigger allocations
+        triggerSchedulingWithNMHeartBeat();
       }
     }
     assertEquals(0, amClient.ask.size());
     assertEquals(0, amClient.release.size());
+  }
+
+  private void testAllocRequestId(
+      final AMRMClientImpl<ContainerRequest> amClient) throws YarnException,
+      IOException {
+    // setup container request
+
+    assertEquals(0, amClient.ask.size());
+    assertEquals(0, amClient.release.size());
+
+    amClient.addContainerRequest(
+        new ContainerRequest(capability, nodes, racks, priority));
+    amClient.addContainerRequest(
+        new ContainerRequest(capability, nodes, racks, priority));
+    amClient.addContainerRequest(
+        new ContainerRequest(capability, nodes, racks, priority, 1));
+    amClient.addContainerRequest(
+        new ContainerRequest(capability, nodes, racks, priority, 1));
+    amClient.addContainerRequest(
+        new ContainerRequest(capability, nodes, racks, priority, 2));
+    amClient.addContainerRequest(
+        new ContainerRequest(capability, nodes, racks, priority, 2));
+    amClient.removeContainerRequest(
+        new ContainerRequest(capability, nodes, racks, priority));
+    amClient.removeContainerRequest(
+        new ContainerRequest(capability, nodes, racks, priority, 1));
+    amClient.removeContainerRequest(
+        new ContainerRequest(capability, nodes, racks, priority, 2));
+
+    assertNumContainers(amClient, 0, 1, 1, 1, 9, 0);
+    assertNumContainers(amClient, 1, 1, 1, 1, 9, 0);
+    assertNumContainers(amClient, 2, 1, 1, 1, 9, 0);
+    int containersRequestedAny = 3;
+
+    // RM should allocate container within 2 calls to allocate()
+    List<Container> allocatedContainers = new ArrayList<>();
+    int iterationsLeft = 5;
+    Set<ContainerId> releases = new TreeSet<ContainerId>();
+
+    while (allocatedContainers.size() < containersRequestedAny
+        && iterationsLeft-- > 0) {
+      AllocateResponse allocResponse = amClient.allocate(0.1f);
+      assertEquals(0, amClient.ask.size());
+      assertEquals(0, amClient.release.size());
+
+      allocatedContainers.addAll(allocResponse.getAllocatedContainers());
+      for(Container container : allocResponse.getAllocatedContainers()) {
+        ContainerId rejectContainerId = container.getId();
+        releases.add(rejectContainerId);
+        amClient.releaseAssignedContainer(rejectContainerId);
+      }
+
+      if(allocatedContainers.size() < containersRequestedAny) {
+        // let NM heartbeat to RM and trigger allocations
+        triggerSchedulingWithNMHeartBeat();
+      }
+    }
+
+    assertEquals(containersRequestedAny, allocatedContainers.size());
+    Set<Long> expAllocIds = new HashSet<>(
+        Arrays.asList(Long.valueOf(0), Long.valueOf(1), Long.valueOf(2)));
+    Set<Long> actAllocIds = new HashSet<>();
+    for (Container ac : allocatedContainers) {
+      actAllocIds.add(Long.valueOf(ac.getAllocationRequestId()));
+    }
+    assertEquals(expAllocIds, actAllocIds);
+    assertEquals(3, amClient.release.size());
+    assertEquals(0, amClient.ask.size());
+
+    waitForContainerCompletion(3, amClient, releases);
+  }
+
+  private void assertNumContainers(AMRMClientImpl<ContainerRequest> amClient,
+      long allocationReqId, int expNode, int expRack, int expAny,
+      int expAsks, int expRelease) {
+    RemoteRequestsTable<ContainerRequest> remoteRequestsTable =
+        amClient.getTable(allocationReqId);
+    int containersRequestedNode = remoteRequestsTable.get(priority,
+        node, ExecutionType.GUARANTEED, capability).remoteRequest
+        .getNumContainers();
+    int containersRequestedRack = remoteRequestsTable.get(priority,
+        rack, ExecutionType.GUARANTEED, capability).remoteRequest
+        .getNumContainers();
+    int containersRequestedAny = remoteRequestsTable.get(priority,
+        ResourceRequest.ANY, ExecutionType.GUARANTEED, capability)
+        .remoteRequest.getNumContainers();
+
+    assertEquals(expNode, containersRequestedNode);
+    assertEquals(expRack, containersRequestedRack);
+    assertEquals(expAny, containersRequestedAny);
+    assertEquals(expAsks, amClient.ask.size());
+    assertEquals(expRelease, amClient.release.size());
   }
 
   class CountDownSupplier implements Supplier<Boolean> {
@@ -1127,12 +1452,7 @@ public class TestAMRMClient {
       while (System.currentTimeMillis() - startTime <
           rolling_interval_sec * 1000) {
         amClient.allocate(0.1f);
-        try {
-          Thread.sleep(1000);
-        } catch (InterruptedException e) {
-          // TODO Auto-generated catch block
-          e.printStackTrace();
-        }
+        sleep(1000);
       }
       amClient.allocate(0.1f);
 
@@ -1192,11 +1512,7 @@ public class TestAMRMClient {
           }
         }
         amClient.allocate(0.1f);
-        try {
-          Thread.sleep(1000);
-        } catch (InterruptedException e) {
-          // DO NOTHING
-        }
+        sleep(1000);
       }
 
       try {

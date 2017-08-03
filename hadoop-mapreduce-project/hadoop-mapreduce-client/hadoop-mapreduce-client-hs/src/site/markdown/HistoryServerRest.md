@@ -15,27 +15,7 @@
 MapReduce History Server REST API's.
 ====================================
 
-* [MapReduce History Server REST API's.](#MapReduce_History_Server_REST_APIs.)
-    * [Overview](#Overview)
-    * [History Server Information API](#History_Server_Information_API)
-        * [URI](#URI)
-        * [HTTP Operations Supported](#HTTP_Operations_Supported)
-        * [Query Parameters Supported](#Query_Parameters_Supported)
-        * [Elements of the historyInfo object](#Elements_of_the_historyInfo_object)
-        * [Response Examples](#Response_Examples)
-    * [MapReduce API's](#MapReduce_APIs)
-        * [Jobs API](#Jobs_API)
-        * [Job API](#Job_API)
-        * [Elements of the acls object](#Elements_of_the_acls_object)
-        * [Job Attempts API](#Job_Attempts_API)
-        * [Job Counters API](#Job_Counters_API)
-        * [Job Conf API](#Job_Conf_API)
-        * [Tasks API](#Tasks_API)
-        * [Task API](#Task_API)
-        * [Task Counters API](#Task_Counters_API)
-        * [Task Attempts API](#Task_Attempts_API)
-        * [Task Attempt API](#Task_Attempt_API)
-        * [Task Attempt Counters API](#Task_Attempt_Counters_API)
+<!-- MACRO{toc|fromDepth=0|toDepth=2} -->
 
 Overview
 --------
@@ -140,7 +120,7 @@ The jobs resource provides a list of the MapReduce jobs that have finished. It d
 
 #### Query Parameters Supported
 
-Multiple paramters can be specified. The started and finished times have a begin and end parameter to allow you to specify ranges. For example, one could request all jobs that started between 1:00am and 2:00pm on 12/19/2011 with startedTimeBegin=1324256400&startedTimeEnd=1324303200. If the Begin parameter is not specfied, it defaults to 0, and if the End parameter is not specified, it defaults to infinity.
+Multiple parameters can be specified. The started and finished times have a begin and end parameter to allow you to specify ranges. For example, one could request all jobs that started between 1:00am and 2:00pm on 12/19/2011 with startedTimeBegin=1324256400&startedTimeEnd=1324303200. If the Begin parameter is not specfied, it defaults to 0, and if the End parameter is not specified, it defaults to infinity.
 
       * user - user name
       * state - the job state

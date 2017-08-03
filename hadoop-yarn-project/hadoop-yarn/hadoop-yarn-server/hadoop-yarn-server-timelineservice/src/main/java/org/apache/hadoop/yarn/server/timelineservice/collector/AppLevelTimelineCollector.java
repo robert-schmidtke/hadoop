@@ -58,6 +58,8 @@ public class AppLevelTimelineCollector extends TimelineCollector {
   private final ApplicationId appId;
   private final TimelineCollectorContext context;
   private ScheduledThreadPoolExecutor appAggregationExecutor;
+  private AppLevelAggregator appAggregator;
+  private UserGroupInformation currentUser;
 
   public AppLevelTimelineCollector(ApplicationId appId) {
     super(AppLevelTimelineCollector.class.getName() + " - " + appId.toString());
@@ -81,7 +83,8 @@ public class AppLevelTimelineCollector extends TimelineCollector {
     // Set the default values, which will be updated with an RPC call to get the
     // context info from NM.
     // Current user usually is not the app user, but keep this field non-null
-    context.setUserId(UserGroupInformation.getCurrentUser().getShortUserName());
+    currentUser = UserGroupInformation.getCurrentUser();
+    context.setUserId(currentUser.getShortUserName());
     context.setAppId(appId.toString());
     super.serviceInit(conf);
   }
@@ -94,7 +97,8 @@ public class AppLevelTimelineCollector extends TimelineCollector {
         new ThreadFactoryBuilder()
             .setNameFormat("TimelineCollector Aggregation thread #%d")
             .build());
-    appAggregationExecutor.scheduleAtFixedRate(new AppLevelAggregator(),
+    appAggregator = new AppLevelAggregator();
+    appAggregationExecutor.scheduleAtFixedRate(appAggregator,
         AppLevelTimelineCollector.AGGREGATION_EXECUTOR_EXEC_INTERVAL_SECS,
         AppLevelTimelineCollector.AGGREGATION_EXECUTOR_EXEC_INTERVAL_SECS,
         TimeUnit.SECONDS);
@@ -108,6 +112,8 @@ public class AppLevelTimelineCollector extends TimelineCollector {
       LOG.info("App-level aggregator shutdown timed out, shutdown now. ");
       appAggregationExecutor.shutdownNow();
     }
+    // Perform one round of aggregation after the aggregation executor is done.
+    appAggregator.aggregate();
     super.serviceStop();
   }
 
@@ -123,8 +129,7 @@ public class AppLevelTimelineCollector extends TimelineCollector {
 
   private class AppLevelAggregator implements Runnable {
 
-    @Override
-    public void run() {
+    private void aggregate() {
       if (LOG.isDebugEnabled()) {
         LOG.debug("App-level real-time aggregating");
       }
@@ -146,15 +151,18 @@ public class AppLevelTimelineCollector extends TimelineCollector {
             TimelineEntityType.YARN_APPLICATION.toString());
         TimelineEntities entities = new TimelineEntities();
         entities.addEntity(resultEntity);
-        getWriter().write(currContext.getClusterId(), currContext.getUserId(),
-            currContext.getFlowName(), currContext.getFlowVersion(),
-            currContext.getFlowRunId(), currContext.getAppId(), entities);
+        putEntitiesAsync(entities, currentUser);
       } catch (Exception e) {
         LOG.error("Error aggregating timeline metrics", e);
       }
       if (LOG.isDebugEnabled()) {
         LOG.debug("App-level real-time aggregation complete");
       }
+    }
+
+    @Override
+    public void run() {
+      aggregate();
     }
   }
 

@@ -17,6 +17,8 @@
 */
 package org.apache.hadoop.yarn.util.resource;
 
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.classification.InterfaceStability.Unstable;
 import org.apache.hadoop.yarn.api.records.Resource;
@@ -45,19 +47,22 @@ import org.apache.hadoop.yarn.api.records.Resource;
 @Private
 @Unstable
 public class DominantResourceCalculator extends ResourceCalculator {
-  
+  private static final Log LOG =
+      LogFactory.getLog(DominantResourceCalculator.class);
+
   @Override
-  public int compare(Resource clusterResource, Resource lhs, Resource rhs) {
+  public int compare(Resource clusterResource, Resource lhs, Resource rhs,
+      boolean singleType) {
     
     if (lhs.equals(rhs)) {
       return 0;
     }
     
     if (isInvalidDivisor(clusterResource)) {
-      if ((lhs.getMemorySize() < rhs.getMemorySize() && lhs.getVirtualCores() > rhs
-          .getVirtualCores())
-          || (lhs.getMemorySize() > rhs.getMemorySize() && lhs.getVirtualCores() < rhs
-              .getVirtualCores())) {
+      if ((lhs.getMemorySize() < rhs.getMemorySize() &&
+          lhs.getVirtualCores() > rhs.getVirtualCores()) ||
+          (lhs.getMemorySize() > rhs.getMemorySize() &&
+          lhs.getVirtualCores() < rhs.getVirtualCores())) {
         return 0;
       } else if (lhs.getMemorySize() > rhs.getMemorySize()
           || lhs.getVirtualCores() > rhs.getVirtualCores()) {
@@ -75,7 +80,7 @@ public class DominantResourceCalculator extends ResourceCalculator {
       return -1;
     } else if (l > r) {
       return 1;
-    } else {
+    } else if (!singleType) {
       l = getResourceAsValue(clusterResource, lhs, false);
       r = getResourceAsValue(clusterResource, rhs, false);
       if (l < r) {
@@ -150,8 +155,35 @@ public class DominantResourceCalculator extends ResourceCalculator {
   }
 
   @Override
+  public Resource divideAndCeil(Resource numerator, float denominator) {
+    return Resources.createResource(
+        divideAndCeil(numerator.getMemorySize(), denominator),
+        divideAndCeil(numerator.getVirtualCores(), denominator)
+        );
+  }
+
+  @Override
   public Resource normalize(Resource r, Resource minimumResource,
                             Resource maximumResource, Resource stepFactor) {
+    if (stepFactor.getMemorySize() == 0 || stepFactor.getVirtualCores() == 0) {
+      Resource step = Resources.clone(stepFactor);
+      if (stepFactor.getMemorySize() == 0) {
+        LOG.error("Memory cannot be allocated in increments of zero. Assuming "
+            + minimumResource.getMemorySize() + "MB increment size. "
+            + "Please ensure the scheduler configuration is correct.");
+        step.setMemorySize(minimumResource.getMemorySize());
+      }
+
+      if (stepFactor.getVirtualCores() == 0) {
+        LOG.error("VCore cannot be allocated in increments of zero. Assuming "
+            + minimumResource.getVirtualCores() + "VCores increment size. "
+            + "Please ensure the scheduler configuration is correct.");
+        step.setVirtualCores(minimumResource.getVirtualCores());
+      }
+
+      stepFactor = step;
+    }
+
     long normalizedMemory = Math.min(
       roundUp(
         Math.max(r.getMemorySize(), minimumResource.getMemorySize()),
@@ -186,27 +218,19 @@ public class DominantResourceCalculator extends ResourceCalculator {
   public Resource multiplyAndNormalizeUp(Resource r, double by,
       Resource stepFactor) {
     return Resources.createResource(
-        roundUp(
-            (int)Math.ceil(r.getMemorySize() * by), stepFactor.getMemorySize()),
-        roundUp(
-            (int)Math.ceil(r.getVirtualCores() * by),
-            stepFactor.getVirtualCores())
-        );
+        roundUp((long) Math.ceil((float) (r.getMemorySize() * by)),
+            stepFactor.getMemorySize()),
+        roundUp((int) Math.ceil((float) (r.getVirtualCores() * by)),
+            stepFactor.getVirtualCores()));
   }
 
   @Override
   public Resource multiplyAndNormalizeDown(Resource r, double by,
       Resource stepFactor) {
     return Resources.createResource(
-        roundDown(
-            (int)(r.getMemorySize() * by),
-            stepFactor.getMemorySize()
-            ),
-        roundDown(
-            (int)(r.getVirtualCores() * by),
-            stepFactor.getVirtualCores()
-            )
-        );
+        roundDown((long) (r.getMemorySize() * by), stepFactor.getMemorySize()),
+        roundDown((int) (r.getVirtualCores() * by),
+            stepFactor.getVirtualCores()));
   }
 
   @Override
@@ -214,5 +238,10 @@ public class DominantResourceCalculator extends ResourceCalculator {
       Resource smaller, Resource bigger) {
     return smaller.getMemorySize() <= bigger.getMemorySize()
         && smaller.getVirtualCores() <= bigger.getVirtualCores();
+  }
+
+  @Override
+  public boolean isAnyMajorResourceZero(Resource resource) {
+    return resource.getMemorySize() == 0f || resource.getVirtualCores() == 0;
   }
 }

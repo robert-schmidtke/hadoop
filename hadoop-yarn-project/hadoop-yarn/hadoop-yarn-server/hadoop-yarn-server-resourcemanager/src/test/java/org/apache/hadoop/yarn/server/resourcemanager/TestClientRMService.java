@@ -22,6 +22,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.Matchers.any;
 import static org.mockito.Matchers.anyBoolean;
+import static org.mockito.Matchers.anyListOf;
 import static org.mockito.Matchers.anyString;
 import static org.mockito.Matchers.eq;
 import static org.mockito.Mockito.doReturn;
@@ -33,8 +34,11 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.security.AccessControlException;
+import java.security.PrivilegedExceptionAction;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -105,6 +109,7 @@ import org.apache.hadoop.yarn.api.records.NodeReport;
 import org.apache.hadoop.yarn.api.records.NodeState;
 import org.apache.hadoop.yarn.api.records.Priority;
 import org.apache.hadoop.yarn.api.records.QueueACL;
+import org.apache.hadoop.yarn.api.records.QueueConfigurations;
 import org.apache.hadoop.yarn.api.records.QueueInfo;
 import org.apache.hadoop.yarn.api.records.ReservationDefinition;
 import org.apache.hadoop.yarn.api.records.ReservationId;
@@ -142,6 +147,8 @@ import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.Capacity
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.CapacitySchedulerConfiguration;
 import org.apache.hadoop.yarn.server.resourcemanager.security.QueueACLsManager;
 import org.apache.hadoop.yarn.server.resourcemanager.timelineservice.RMTimelineCollectorManager;
+
+import org.apache.hadoop.yarn.server.scheduler.SchedulerRequestKey;
 import org.apache.hadoop.yarn.server.security.ApplicationACLsManager;
 import org.apache.hadoop.yarn.server.utils.BuilderUtils;
 import org.apache.hadoop.yarn.util.Clock;
@@ -153,6 +160,8 @@ import org.junit.Test;
 
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Sets;
+import org.mockito.invocation.InvocationOnMock;
+import org.mockito.stubbing.Answer;
 
 public class TestClientRMService {
 
@@ -276,7 +285,8 @@ public class TestClientRMService {
     } catch (ApplicationNotFoundException ex) {
       Assert.assertEquals(ex.getMessage(),
           "Application with id '" + request.getApplicationId()
-              + "' doesn't exist in RM.");
+              + "' doesn't exist in RM. Please check that the "
+              + "job submission was successful.");
     }
   }
 
@@ -388,7 +398,7 @@ public class TestClientRMService {
         mock(ApplicationSubmissionContext.class);
     YarnConfiguration config = new YarnConfiguration();
     RMAppAttemptImpl rmAppAttemptImpl = new RMAppAttemptImpl(attemptId,
-        rmContext, yarnScheduler, null, asContext, config, false, null);
+        rmContext, yarnScheduler, null, asContext, config, null, null);
     ApplicationResourceUsageReport report = rmAppAttemptImpl
         .getApplicationResourceUsageReport();
     assertEquals(report, RMServerUtils.DUMMY_APPLICATION_RESOURCE_USAGE_REPORT);
@@ -456,7 +466,7 @@ public class TestClientRMService {
     }
   }
 
-  public ClientRMService createRMService() throws IOException {
+  public ClientRMService createRMService() throws IOException, YarnException {
     YarnScheduler yarnScheduler = mockYarnScheduler();
     RMContext rmContext = mock(RMContext.class);
     mockRMContext(yarnScheduler, rmContext);
@@ -506,7 +516,8 @@ public class TestClientRMService {
   @Test
   public void testForceKillApplication() throws Exception {
     YarnConfiguration conf = new YarnConfiguration();
-    MockRM rm = new MockRM();
+    conf.setBoolean(MockRM.ENABLE_WEBAPP, true);
+    MockRM rm = new MockRM(conf);
     rm.init(conf);
     rm.start();
 
@@ -522,6 +533,8 @@ public class TestClientRMService {
 
     KillApplicationRequest killRequest1 =
         KillApplicationRequest.newInstance(app1.getApplicationId());
+    String diagnostic = "message1";
+    killRequest1.setDiagnostics(diagnostic);
     KillApplicationRequest killRequest2 =
         KillApplicationRequest.newInstance(app2.getApplicationId());
 
@@ -539,6 +552,8 @@ public class TestClientRMService {
         killAttemptCount > 1);
     assertEquals("Incorrect number of apps in the RM", 1,
         rmService.getApplications(getRequest).getApplicationList().size());
+    assertTrue("Diagnostic message is incorrect",
+        app1.getDiagnostics().toString().contains(diagnostic));
 
     KillApplicationResponse killResponse2 =
         rmService.forceKillApplication(killRequest2);
@@ -565,8 +580,259 @@ public class TestClientRMService {
     ApplicationId applicationId =
         BuilderUtils.newApplicationId(System.currentTimeMillis(), 0);
     MoveApplicationAcrossQueuesRequest request =
-        MoveApplicationAcrossQueuesRequest.newInstance(applicationId, "newqueue");
+        MoveApplicationAcrossQueuesRequest.newInstance(applicationId,
+            "newqueue");
     rmService.moveApplicationAcrossQueues(request);
+  }
+
+  @Test
+  public void testMoveApplicationSubmitTargetQueue() throws Exception {
+    // move the application as the owner
+    ApplicationId applicationId = getApplicationId(1);
+    UserGroupInformation aclUGI = UserGroupInformation.getCurrentUser();
+    QueueACLsManager queueACLsManager = getQueueAclManager("allowed_queue",
+        QueueACL.SUBMIT_APPLICATIONS, aclUGI);
+    ApplicationACLsManager appAclsManager = getAppAclManager();
+
+    ClientRMService rmService = createClientRMServiceForMoveApplicationRequest(
+        applicationId, aclUGI.getShortUserName(), appAclsManager,
+        queueACLsManager);
+
+    // move as the owner queue in the acl
+    MoveApplicationAcrossQueuesRequest moveAppRequest =
+        MoveApplicationAcrossQueuesRequest.
+        newInstance(applicationId, "allowed_queue");
+    rmService.moveApplicationAcrossQueues(moveAppRequest);
+
+    // move as the owner queue not in the acl
+    moveAppRequest = MoveApplicationAcrossQueuesRequest.newInstance(
+        applicationId, "not_allowed");
+
+    try {
+      rmService.moveApplicationAcrossQueues(moveAppRequest);
+      Assert.fail("The request should fail with an AccessControlException");
+    } catch (YarnException rex) {
+      Assert.assertTrue("AccessControlException is expected",
+          rex.getCause() instanceof AccessControlException);
+    }
+
+    // ACL is owned by "moveuser", move is performed as a different user
+    aclUGI = UserGroupInformation.createUserForTesting("moveuser",
+        new String[]{});
+    queueACLsManager = getQueueAclManager("move_queue",
+        QueueACL.SUBMIT_APPLICATIONS, aclUGI);
+    appAclsManager = getAppAclManager();
+    ClientRMService rmService2 =
+        createClientRMServiceForMoveApplicationRequest(applicationId,
+            aclUGI.getShortUserName(), appAclsManager, queueACLsManager);
+
+    // access to the queue not OK: user not allowed in this queue
+    MoveApplicationAcrossQueuesRequest moveAppRequest2 =
+        MoveApplicationAcrossQueuesRequest.
+            newInstance(applicationId, "move_queue");
+    try {
+      rmService2.moveApplicationAcrossQueues(moveAppRequest2);
+      Assert.fail("The request should fail with an AccessControlException");
+    } catch (YarnException rex) {
+      Assert.assertTrue("AccessControlException is expected",
+          rex.getCause() instanceof AccessControlException);
+    }
+
+    // execute the move as the acl owner
+    // access to the queue OK: user allowed in this queue
+    aclUGI.doAs(new PrivilegedExceptionAction<Object>() {
+      @Override
+      public Object run() throws Exception {
+        return rmService2.moveApplicationAcrossQueues(moveAppRequest2);
+      }
+    });
+  }
+
+  @Test
+  public void testMoveApplicationAdminTargetQueue() throws Exception {
+    ApplicationId applicationId = getApplicationId(1);
+    UserGroupInformation aclUGI = UserGroupInformation.getCurrentUser();
+    QueueACLsManager queueAclsManager = getQueueAclManager("allowed_queue",
+        QueueACL.ADMINISTER_QUEUE, aclUGI);
+    ApplicationACLsManager appAclsManager = getAppAclManager();
+    ClientRMService rmService =
+        createClientRMServiceForMoveApplicationRequest(applicationId,
+            aclUGI.getShortUserName(), appAclsManager, queueAclsManager);
+
+    // user is admin move to queue in acl
+    MoveApplicationAcrossQueuesRequest moveAppRequest =
+        MoveApplicationAcrossQueuesRequest.newInstance(applicationId,
+            "allowed_queue");
+    rmService.moveApplicationAcrossQueues(moveAppRequest);
+
+    // user is admin move to queue not in acl
+    moveAppRequest = MoveApplicationAcrossQueuesRequest.newInstance(
+        applicationId, "not_allowed");
+
+    try {
+      rmService.moveApplicationAcrossQueues(moveAppRequest);
+      Assert.fail("The request should fail with an AccessControlException");
+    } catch (YarnException rex) {
+      Assert.assertTrue("AccessControlException is expected",
+          rex.getCause() instanceof AccessControlException);
+    }
+
+    // ACL is owned by "moveuser", move is performed as a different user
+    aclUGI = UserGroupInformation.createUserForTesting("moveuser",
+        new String[]{});
+    queueAclsManager = getQueueAclManager("move_queue",
+        QueueACL.ADMINISTER_QUEUE, aclUGI);
+    appAclsManager = getAppAclManager();
+    ClientRMService rmService2 =
+        createClientRMServiceForMoveApplicationRequest(applicationId,
+            aclUGI.getShortUserName(), appAclsManager, queueAclsManager);
+
+    // no access to this queue
+    MoveApplicationAcrossQueuesRequest moveAppRequest2 =
+        MoveApplicationAcrossQueuesRequest.
+            newInstance(applicationId, "move_queue");
+
+    try {
+      rmService2.moveApplicationAcrossQueues(moveAppRequest2);
+      Assert.fail("The request should fail with an AccessControlException");
+    } catch (YarnException rex) {
+      Assert.assertTrue("AccessControlException is expected",
+          rex.getCause() instanceof AccessControlException);
+    }
+
+    // execute the move as the acl owner
+    // access to the queue OK: user allowed in this queue
+    aclUGI.doAs(new PrivilegedExceptionAction<Object>() {
+      @Override
+      public Object run() throws Exception {
+        return rmService2.moveApplicationAcrossQueues(moveAppRequest2);
+      }
+    });
+  }
+
+  @Test (expected = YarnException.class)
+  public void testNonExistingQueue() throws Exception {
+    ApplicationId applicationId = getApplicationId(1);
+    UserGroupInformation aclUGI = UserGroupInformation.getCurrentUser();
+    QueueACLsManager queueAclsManager = getQueueAclManager();
+    ApplicationACLsManager appAclsManager = getAppAclManager();
+    ClientRMService rmService =
+        createClientRMServiceForMoveApplicationRequest(applicationId,
+            aclUGI.getShortUserName(), appAclsManager, queueAclsManager);
+
+    MoveApplicationAcrossQueuesRequest moveAppRequest =
+        MoveApplicationAcrossQueuesRequest.newInstance(applicationId,
+            "unknown_queue");
+    rmService.moveApplicationAcrossQueues(moveAppRequest);
+  }
+
+  /**
+   * Create an instance of ClientRMService for testing
+   * moveApplicationAcrossQueues requests.
+   * @param applicationId the application
+   * @return ClientRMService
+   */
+  private ClientRMService createClientRMServiceForMoveApplicationRequest(
+      ApplicationId applicationId, String appOwner,
+      ApplicationACLsManager appAclsManager, QueueACLsManager queueAclsManager)
+      throws IOException {
+    RMApp app = mock(RMApp.class);
+    when(app.getUser()).thenReturn(appOwner);
+    when(app.getState()).thenReturn(RMAppState.RUNNING);
+    ConcurrentHashMap<ApplicationId, RMApp> apps = new ConcurrentHashMap<>();
+    apps.put(applicationId, app);
+
+    RMContext rmContext = mock(RMContext.class);
+    when(rmContext.getRMApps()).thenReturn(apps);
+
+    RMAppManager rmAppManager = mock(RMAppManager.class);
+    return new ClientRMService(rmContext, null, rmAppManager, appAclsManager,
+        queueAclsManager, null);
+  }
+
+  /**
+   * Plain application acl manager that always returns true.
+   * @return ApplicationACLsManager
+   */
+  private ApplicationACLsManager getAppAclManager() {
+    ApplicationACLsManager aclsManager = mock(ApplicationACLsManager.class);
+    when(aclsManager.checkAccess(
+        any(UserGroupInformation.class),
+        any(ApplicationAccessType.class),
+        any(String.class),
+        any(ApplicationId.class))).thenReturn(true);
+    return aclsManager;
+  }
+
+  /**
+   * Generate the Queue acl.
+   * @param allowedQueue the queue to allow the move to
+   * @param queueACL the acl to check: submit app or queue admin
+   * @param aclUser the user to check
+   * @return QueueACLsManager
+   */
+  private QueueACLsManager getQueueAclManager(String allowedQueue,
+      QueueACL queueACL, UserGroupInformation aclUser) throws IOException {
+    // ACL that checks the queue is allowed
+    QueueACLsManager queueACLsManager = mock(QueueACLsManager.class);
+    when(queueACLsManager.checkAccess(
+        any(UserGroupInformation.class),
+        any(QueueACL.class),
+        any(RMApp.class),
+        any(String.class),
+        anyListOf(String.class))).thenAnswer(new Answer<Boolean>() {
+            @Override
+            public Boolean answer(InvocationOnMock invocationOnMock) {
+              final UserGroupInformation user =
+                  (UserGroupInformation) invocationOnMock.getArguments()[0];
+              final QueueACL acl =
+                  (QueueACL) invocationOnMock.getArguments()[1];
+              return (queueACL.equals(acl) &&
+                  aclUser.getShortUserName().equals(user.getShortUserName()));
+            }
+        });
+
+    when(queueACLsManager.checkAccess(
+        any(UserGroupInformation.class),
+        any(QueueACL.class),
+        any(RMApp.class),
+        any(String.class),
+        anyListOf(String.class),
+        any(String.class))).thenAnswer(new Answer<Boolean>() {
+          @Override
+          public Boolean answer(InvocationOnMock invocationOnMock) {
+            final UserGroupInformation user =
+                (UserGroupInformation) invocationOnMock.getArguments()[0];
+            final QueueACL acl = (QueueACL) invocationOnMock.getArguments()[1];
+            final String queue = (String) invocationOnMock.getArguments()[5];
+            return (allowedQueue.equals(queue) && queueACL.equals(acl) &&
+                aclUser.getShortUserName().equals(user.getShortUserName()));
+          }
+        });
+    return queueACLsManager;
+  }
+
+  /**
+   * QueueACLsManager that always returns false when a target queue is passed
+   * in and true for other checks to simulate a missing queue.
+   * @return QueueACLsManager
+   */
+  private QueueACLsManager getQueueAclManager() {
+    QueueACLsManager queueACLsManager = mock(QueueACLsManager.class);
+    when(queueACLsManager.checkAccess(
+        any(UserGroupInformation.class),
+        any(QueueACL.class),
+        any(RMApp.class),
+        any(String.class),
+        anyListOf(String.class),
+        any(String.class))).thenReturn(false);
+    when(queueACLsManager.checkAccess(
+        any(UserGroupInformation.class),
+        any(QueueACL.class),
+        any(RMApp.class),
+        any(String.class),
+        anyListOf(String.class))).thenReturn(true);
+    return queueACLsManager;
   }
 
   @Test
@@ -595,6 +861,17 @@ public class TestClientRMService {
     List<ApplicationReport> applications = queueInfo.getQueueInfo()
         .getApplications();
     Assert.assertEquals(2, applications.size());
+    Map<String, QueueConfigurations> queueConfigsByPartition =
+        queueInfo.getQueueInfo().getQueueConfigurations();
+    Assert.assertEquals(1, queueConfigsByPartition.size());
+    Assert.assertTrue(queueConfigsByPartition.containsKey("*"));
+    QueueConfigurations queueConfigs = queueConfigsByPartition.get("*");
+    Assert.assertEquals(0.5f, queueConfigs.getCapacity(), 0.0001f);
+    Assert.assertEquals(0.1f, queueConfigs.getAbsoluteCapacity(), 0.0001f);
+    Assert.assertEquals(1.0f, queueConfigs.getMaxCapacity(), 0.0001f);
+    Assert.assertEquals(1.0f, queueConfigs.getAbsoluteMaxCapacity(), 0.0001f);
+    Assert.assertEquals(0.2f, queueConfigs.getMaxAMPercentage(), 0.0001f);
+
     request.setQueueName("nonexistentqueue");
     request.setIncludeApplications(true);
     // should not throw exception on nonexistent queue
@@ -887,8 +1164,7 @@ public class TestClientRMService {
     final CyclicBarrier startBarrier = new CyclicBarrier(2);
     final CyclicBarrier endBarrier = new CyclicBarrier(2);
 
-    @SuppressWarnings("rawtypes")
-    EventHandler eventHandler = new EventHandler() {
+    EventHandler<Event> eventHandler = new EventHandler<Event>() {
       @Override
       public void handle(Event rawEvent) {
         if (rawEvent instanceof RMAppEvent) {
@@ -963,6 +1239,7 @@ public class TestClientRMService {
     submissionContext.setApplicationType(appType);
     submissionContext.setApplicationTags(tags);
     submissionContext.setUnmanagedAM(unmanaged);
+    submissionContext.setPriority(Priority.newInstance(0));
 
     SubmitApplicationRequest submitRequest =
         recordFactory.newRecordInstance(SubmitApplicationRequest.class);
@@ -974,10 +1251,24 @@ public class TestClientRMService {
       throws IOException {
     Dispatcher dispatcher = mock(Dispatcher.class);
     when(rmContext.getDispatcher()).thenReturn(dispatcher);
-    EventHandler eventHandler = mock(EventHandler.class);
+    @SuppressWarnings("unchecked")
+    EventHandler<Event> eventHandler = mock(EventHandler.class);
     when(dispatcher.getEventHandler()).thenReturn(eventHandler);
+
     QueueInfo queInfo = recordFactory.newRecordInstance(QueueInfo.class);
     queInfo.setQueueName("testqueue");
+    QueueConfigurations queueConfigs =
+        recordFactory.newRecordInstance(QueueConfigurations.class);
+    queueConfigs.setCapacity(0.5f);
+    queueConfigs.setAbsoluteCapacity(0.1f);
+    queueConfigs.setMaxCapacity(1.0f);
+    queueConfigs.setAbsoluteMaxCapacity(1.0f);
+    queueConfigs.setMaxAMPercentage(0.2f);
+    Map<String, QueueConfigurations> queueConfigsByPartition =
+        new HashMap<>();
+    queueConfigsByPartition.put("*", queueConfigs);
+    queInfo.setQueueConfigurations(queueConfigsByPartition);
+
     when(yarnScheduler.getQueueInfo(eq("testqueue"), anyBoolean(), anyBoolean()))
         .thenReturn(queInfo);
     when(yarnScheduler.getQueueInfo(eq("nonexistentqueue"), anyBoolean(), anyBoolean()))
@@ -1037,13 +1328,14 @@ public class TestClientRMService {
     ApplicationSubmissionContext asContext = mock(ApplicationSubmissionContext.class);
     when(asContext.getMaxAppAttempts()).thenReturn(1);
     when(asContext.getNodeLabelExpression()).thenReturn(appNodeLabelExpression);
+    when(asContext.getPriority()).thenReturn(Priority.newInstance(0));
     RMAppImpl app =
         spy(new RMAppImpl(applicationId3, rmContext, config, null, null,
             queueName, asContext, yarnScheduler, null,
             System.currentTimeMillis(), "YARN", null,
-            BuilderUtils.newResourceRequest(
+            Collections.singletonList(BuilderUtils.newResourceRequest(
                 RMAppAttemptImpl.AM_CONTAINER_PRIORITY, ResourceRequest.ANY,
-                Resource.newInstance(1024, 1), 1)){
+                Resource.newInstance(1024, 1), 1))){
                   @Override
                   public ApplicationReport createAndGetApplicationReport(
                       String clientUserName, boolean allowAccess) {
@@ -1057,20 +1349,23 @@ public class TestClientRMService {
                     return report;
                   }
               });
-    app.getAMResourceRequest().setNodeLabelExpression(amNodeLabelExpression);
+    app.getAMResourceRequests().get(0)
+        .setNodeLabelExpression(amNodeLabelExpression);
     ApplicationAttemptId attemptId = ApplicationAttemptId.newInstance(
         ApplicationId.newInstance(123456, 1), 1);
     RMAppAttemptImpl rmAppAttemptImpl = spy(new RMAppAttemptImpl(attemptId,
-        rmContext, yarnScheduler, null, asContext, config, false, null));
+        rmContext, yarnScheduler, null, asContext, config, null, app));
     Container container = Container.newInstance(
         ContainerId.newContainerId(attemptId, 1), null, "", null, null, null);
     RMContainerImpl containerimpl = spy(new RMContainerImpl(container,
-        attemptId, null, "", rmContext));
+        SchedulerRequestKey.extractFrom(container), attemptId, null, "",
+        rmContext));
     Map<ApplicationAttemptId, RMAppAttempt> attempts = 
       new HashMap<ApplicationAttemptId, RMAppAttempt>();
     attempts.put(attemptId, rmAppAttemptImpl);
     when(app.getCurrentAppAttempt()).thenReturn(rmAppAttemptImpl);
     when(app.getAppAttempts()).thenReturn(attempts);
+    when(app.getApplicationPriority()).thenReturn(Priority.newInstance(0));
     when(rmAppAttemptImpl.getMasterContainer()).thenReturn(container);
     ResourceScheduler rs = mock(ResourceScheduler.class);
     when(rmContext.getScheduler()).thenReturn(rs);
@@ -1086,14 +1381,14 @@ public class TestClientRMService {
         rmContext.getScheduler().getSchedulerAppInfo(attemptId)
             .getLiveContainers()).thenReturn(rmContainers);
     ContainerStatus cs = mock(ContainerStatus.class);
-    when(containerimpl.getFinishedStatus()).thenReturn(cs);
+    when(containerimpl.completed()).thenReturn(false);
     when(containerimpl.getDiagnosticsInfo()).thenReturn("N/A");
     when(containerimpl.getContainerExitStatus()).thenReturn(0);
     when(containerimpl.getContainerState()).thenReturn(ContainerState.COMPLETE);
     return app;
   }
 
-  private static YarnScheduler mockYarnScheduler() {
+  private static YarnScheduler mockYarnScheduler() throws YarnException {
     YarnScheduler yarnScheduler = mock(YarnScheduler.class);
     when(yarnScheduler.getMinimumResourceCapability()).thenReturn(
         Resources.createResource(
@@ -1111,6 +1406,9 @@ public class TestClientRMService {
     ResourceCalculator rs = mock(ResourceCalculator.class);
     when(yarnScheduler.getResourceCalculator()).thenReturn(rs);
 
+    when(yarnScheduler.checkAndGetApplicationPriority(any(Priority.class),
+        any(UserGroupInformation.class), anyString(), any(ApplicationId.class)))
+            .thenReturn(Priority.newInstance(0));
     return yarnScheduler;
   }
 
@@ -1523,33 +1821,25 @@ public class TestClientRMService {
     // Get node labels collection
     GetClusterNodeLabelsResponse response = client
         .getClusterNodeLabels(GetClusterNodeLabelsRequest.newInstance());
-    Assert.assertTrue(response.getNodeLabels().containsAll(
+    Assert.assertTrue(response.getNodeLabelList().containsAll(
         Arrays.asList(labelX, labelY)));
 
     // Get node labels mapping
     GetNodesToLabelsResponse response1 = client
         .getNodeToLabels(GetNodesToLabelsRequest.newInstance());
-    Map<NodeId, Set<NodeLabel>> nodeToLabels = response1.getNodeToLabels();
+    Map<NodeId, Set<String>> nodeToLabels = response1.getNodeToLabels();
     Assert.assertTrue(nodeToLabels.keySet().containsAll(
         Arrays.asList(node1, node2)));
     Assert.assertTrue(nodeToLabels.get(node1)
-        .containsAll(Arrays.asList(labelX)));
+        .containsAll(Arrays.asList(labelX.getName())));
     Assert.assertTrue(nodeToLabels.get(node2)
-        .containsAll(Arrays.asList(labelY)));
-    // Verify whether labelX's exclusivity is false
-    for (NodeLabel x : nodeToLabels.get(node1)) {
-      Assert.assertFalse(x.isExclusive());
-    }
-    // Verify whether labelY's exclusivity is true
-    for (NodeLabel y : nodeToLabels.get(node2)) {
-      Assert.assertTrue(y.isExclusive());
-    }
+        .containsAll(Arrays.asList(labelY.getName())));
     // Below label "x" is not present in the response as exclusivity is true
     Assert.assertFalse(nodeToLabels.get(node1).containsAll(
         Arrays.asList(NodeLabel.newInstance("x"))));
 
     rpc.stopProxy(client, conf);
-    rm.close();
+    rm.stop();
   }
 
   @Test
@@ -1594,24 +1884,20 @@ public class TestClientRMService {
     // Get node labels collection
     GetClusterNodeLabelsResponse response = client
         .getClusterNodeLabels(GetClusterNodeLabelsRequest.newInstance());
-    Assert.assertTrue(response.getNodeLabels().containsAll(
+    Assert.assertTrue(response.getNodeLabelList().containsAll(
         Arrays.asList(labelX, labelY, labelZ)));
 
     // Get labels to nodes mapping
     GetLabelsToNodesResponse response1 = client
         .getLabelsToNodes(GetLabelsToNodesRequest.newInstance());
-    Map<NodeLabel, Set<NodeId>> labelsToNodes = response1.getLabelsToNodes();
-    // Verify whether all NodeLabel's exclusivity are false
-    for (Map.Entry<NodeLabel, Set<NodeId>> nltn : labelsToNodes.entrySet()) {
-      Assert.assertFalse(nltn.getKey().isExclusive());
-    }
+    Map<String, Set<NodeId>> labelsToNodes = response1.getLabelsToNodes();
     Assert.assertTrue(labelsToNodes.keySet().containsAll(
-        Arrays.asList(labelX, labelY, labelZ)));
-    Assert.assertTrue(labelsToNodes.get(labelX).containsAll(
+        Arrays.asList(labelX.getName(), labelY.getName(), labelZ.getName())));
+    Assert.assertTrue(labelsToNodes.get(labelX.getName()).containsAll(
         Arrays.asList(node1A)));
-    Assert.assertTrue(labelsToNodes.get(labelY).containsAll(
+    Assert.assertTrue(labelsToNodes.get(labelY.getName()).containsAll(
         Arrays.asList(node2A, node3A)));
-    Assert.assertTrue(labelsToNodes.get(labelZ).containsAll(
+    Assert.assertTrue(labelsToNodes.get(labelZ.getName()).containsAll(
         Arrays.asList(node1B, node3B)));
 
     // Get labels to nodes mapping for specific labels
@@ -1620,20 +1906,35 @@ public class TestClientRMService {
     GetLabelsToNodesResponse response2 = client
         .getLabelsToNodes(GetLabelsToNodesRequest.newInstance(setlabels));
     labelsToNodes = response2.getLabelsToNodes();
-    // Verify whether all NodeLabel's exclusivity are false
-    for (Map.Entry<NodeLabel, Set<NodeId>> nltn : labelsToNodes.entrySet()) {
-      Assert.assertFalse(nltn.getKey().isExclusive());
-    }
     Assert.assertTrue(labelsToNodes.keySet().containsAll(
-        Arrays.asList(labelX, labelZ)));
-    Assert.assertTrue(labelsToNodes.get(labelX).containsAll(
+        Arrays.asList(labelX.getName(), labelZ.getName())));
+    Assert.assertTrue(labelsToNodes.get(labelX.getName()).containsAll(
         Arrays.asList(node1A)));
-    Assert.assertTrue(labelsToNodes.get(labelZ).containsAll(
+    Assert.assertTrue(labelsToNodes.get(labelZ.getName()).containsAll(
         Arrays.asList(node1B, node3B)));
-    Assert.assertEquals(labelsToNodes.get(labelY), null);
+    Assert.assertEquals(labelsToNodes.get(labelY.getName()), null);
 
     rpc.stopProxy(client, conf);
     rm.close();
+  }
+
+  @Test(timeout = 120000)
+  public void testUpdatePriorityAndKillAppWithZeroClusterResource()
+      throws Exception {
+    int maxPriority = 10;
+    int appPriority = 5;
+    YarnConfiguration conf = new YarnConfiguration();
+    conf.setInt(YarnConfiguration.MAX_CLUSTER_LEVEL_APPLICATION_PRIORITY,
+        maxPriority);
+    MockRM rm = new MockRM(conf);
+    rm.init(conf);
+    rm.start();
+    RMApp app1 = rm.submitApp(1024, Priority.newInstance(appPriority));
+    ClientRMService rmService = rm.getClientRMService();
+    testApplicationPriorityUpdation(rmService, app1, appPriority, appPriority);
+    rm.killApp(app1.getApplicationId());
+    rm.waitForState(app1.getApplicationId(), RMAppState.KILLED);
+    rm.stop();
   }
 
   @Test(timeout = 120000)
@@ -1646,13 +1947,12 @@ public class TestClientRMService {
     MockRM rm = new MockRM(conf);
     rm.init(conf);
     rm.start();
-
+    rm.registerNode("host1:1234", 1024);
     // Start app1 with appPriority 5
     RMApp app1 = rm.submitApp(1024, Priority.newInstance(appPriority));
 
     Assert.assertEquals("Incorrect priority has been set to application",
-        appPriority, app1.getApplicationSubmissionContext().getPriority()
-            .getPriority());
+        appPriority, app1.getApplicationPriority().getPriority());
 
     appPriority = 11;
     ClientRMService rmService = rm.getClientRMService();

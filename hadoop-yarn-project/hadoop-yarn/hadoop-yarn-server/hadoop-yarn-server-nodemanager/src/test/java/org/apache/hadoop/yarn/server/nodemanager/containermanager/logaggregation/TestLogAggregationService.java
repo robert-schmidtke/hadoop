@@ -120,6 +120,8 @@ import org.apache.hadoop.yarn.server.nodemanager.containermanager.application.Ap
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.application.ApplicationEvent;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.application.ApplicationEventType;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.container.Container;
+import org.apache.hadoop.yarn.server.nodemanager.containermanager.deletion.task.FileDeletionMatcher;
+import org.apache.hadoop.yarn.server.nodemanager.containermanager.deletion.task.FileDeletionTask;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.loghandler.TestNonAggregatingLogHandler;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.loghandler.event.LogHandlerAppFinishedEvent;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.loghandler.event.LogHandlerAppStartedEvent;
@@ -132,7 +134,7 @@ import org.junit.Assert;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
-import org.mortbay.util.MultiException;
+import org.eclipse.jetty.util.MultiException;
 
 import com.google.common.base.Supplier;
 
@@ -157,7 +159,7 @@ public class TestLogAggregationService extends BaseContainerManagerTest {
   }
   
   DrainDispatcher dispatcher;
-  EventHandler<ApplicationEvent> appEventHandler;
+  EventHandler<Event> appEventHandler;
 
   @Override
   @SuppressWarnings("unchecked")
@@ -218,8 +220,10 @@ public class TestLogAggregationService extends BaseContainerManagerTest {
     // ensure filesystems were closed
     verify(logAggregationService).closeFileSystems(
         any(UserGroupInformation.class));
-    verify(delSrvc).delete(eq(user), eq((Path) null),
-      eq(new Path(app1LogDir.getAbsolutePath())));
+    List<Path> dirList = new ArrayList<>();
+    dirList.add(new Path(app1LogDir.toURI()));
+    verify(delSrvc, times(2)).delete(argThat(new FileDeletionMatcher(
+        delSrvc, user, null, dirList)));
     
     String containerIdStr = container11.toString();
     File containerLogDir = new File(app1LogDir, containerIdStr);
@@ -333,7 +337,9 @@ public class TestLogAggregationService extends BaseContainerManagerTest {
     logAggregationService.stop();
     delSrvc.stop();
     // Aggregated logs should not be deleted if not uploaded.
-    verify(delSrvc, times(0)).delete(user, null);
+    FileDeletionTask deletionTask = new FileDeletionTask(delSrvc, user, null,
+        null);
+    verify(delSrvc, times(0)).delete(deletionTask);
   }
 
   @Test
@@ -608,7 +614,7 @@ public class TestLogAggregationService extends BaseContainerManagerTest {
       throws Exception {
     this.conf.set(YarnConfiguration.NM_LOG_DIRS, localLogDir.getAbsolutePath());
     File aNewFile = new File(String.valueOf("tmp"+System.currentTimeMillis()));
-    this.conf.set(YarnConfiguration.NM_REMOTE_APP_LOG_DIR, 
+    this.conf.set(YarnConfiguration.NM_REMOTE_APP_LOG_DIR,
         aNewFile.getAbsolutePath());
 
     LogAggregationService logAggregationService = spy(
@@ -623,6 +629,28 @@ public class TestLogAggregationService extends BaseContainerManagerTest {
     boolean existsAfter = aNewFile.exists();
     assertTrue("The new aggregate file is not successfully created", existsAfter);
     aNewFile.delete(); //housekeeping
+  }
+
+  @Test
+  public void testRemoteRootLogDirIsCreatedWithCorrectGroupOwner()
+      throws IOException {
+    this.conf.set(YarnConfiguration.NM_LOG_DIRS, localLogDir.getAbsolutePath());
+    Path aNewFile = new Path(String.valueOf("tmp"+System.currentTimeMillis()));
+    this.conf.set(YarnConfiguration.NM_REMOTE_APP_LOG_DIR, aNewFile.getName());
+
+    LogAggregationService logAggregationService = new LogAggregationService(
+        dispatcher, this.context, this.delSrvc, super.dirsHandler);
+    logAggregationService.init(this.conf);
+    logAggregationService.verifyAndCreateRemoteLogDir(this.conf);
+
+    String targetGroup =
+        UserGroupInformation.getLoginUser().getPrimaryGroupName();
+    FileSystem fs = FileSystem.get(this.conf);
+    FileStatus fileStatus = fs.getFileStatus(aNewFile);
+    Assert.assertEquals("The new aggregate file is not successfully created",
+        fileStatus.getGroup(), targetGroup);
+
+    fs.delete(aNewFile, true);
   }
 
   @Test
@@ -793,8 +821,9 @@ public class TestLogAggregationService extends BaseContainerManagerTest {
     assertEquals(0, logAggregationService.getNumAggregators());
     // local log dir shouldn't be deleted given log aggregation cannot
     // continue due to aggregated log dir creation failure on remoteFS.
-    verify(spyDelSrvc, never()).delete(eq(user), any(Path.class),
-        Mockito.<Path>anyVararg());
+    FileDeletionTask deletionTask = new FileDeletionTask(spyDelSrvc, user,
+        null, null);
+    verify(spyDelSrvc, never()).delete(deletionTask);
     verify(logAggregationService).closeFileSystems(
         any(UserGroupInformation.class));
     // make sure local log dir is not deleted in case log aggregation
@@ -2138,7 +2167,7 @@ public class TestLogAggregationService extends BaseContainerManagerTest {
             ApplicationEventType.APPLICATION_LOG_HANDLING_INITED) };
     checkEvents(appEventHandler, expectedInitEvents, false, "getType",
         "getApplicationID");
-    reset(appEventHandler);
+    reset(new EventHandler[] {appEventHandler});
 
     logAggregationService.handle(new LogHandlerAppFinishedEvent(appId));
     logAggregationService.stop();

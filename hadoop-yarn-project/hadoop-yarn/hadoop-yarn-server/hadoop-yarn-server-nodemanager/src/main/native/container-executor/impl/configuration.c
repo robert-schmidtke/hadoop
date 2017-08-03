@@ -17,7 +17,7 @@
  */
 
 // ensure we get the posix version of dirname by including this first
-#include <libgen.h> 
+#include <libgen.h>
 
 #include "configuration.h"
 #include "container-executor.h"
@@ -31,6 +31,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <limits.h>
+#include <ctype.h>
 
 #define MAX_SIZE 10
 
@@ -68,7 +69,7 @@ static int is_only_root_writable(const char *file) {
     return 0;
   }
   if ((file_stat.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
-    fprintf(ERRORFILE, 
+    fprintf(ERRORFILE,
 	    "File %s must not be world or group writable, but is %03lo\n",
 	    file, (unsigned long)file_stat.st_mode & (~S_IFMT));
     return 0;
@@ -92,8 +93,13 @@ char *resolve_config_path(const char* file_name, const char *root) {
     real_fname = buffer;
   }
 
+#ifdef HAVE_CANONICALIZE_FILE_NAME
+  char * ret = (real_fname == NULL) ? NULL : canonicalize_file_name(real_fname);
+#else
   char * ret = (real_fname == NULL) ? NULL : realpath(real_fname, NULL);
+#endif
 #ifdef DEBUG
+  fprintf(stderr,"ret = %s\n", ret);
   fprintf(stderr, "resolve_config_path(file_name=%s,root=%s)=%s\n",
           file_name, root ? root : "null", ret ? ret : "null");
 #endif
@@ -102,7 +108,7 @@ char *resolve_config_path(const char* file_name, const char *root) {
 
 /**
  * Ensure that the configuration file and all of the containing directories
- * are only writable by root. Otherwise, an attacker can change the 
+ * are only writable by root. Otherwise, an attacker can change the
  * configuration and potentially cause damage.
  * returns 0 if permissions are ok
  */
@@ -121,6 +127,38 @@ int check_configuration_permissions(const char* file_name) {
   return 0;
 }
 
+/**
+ * Trim whitespace from beginning and end.
+*/
+char* trim(char* input)
+{
+    char *val_begin;
+    char *val_end;
+    char *ret;
+
+    if (input == NULL) {
+      return NULL;
+    }
+
+    val_begin = input;
+    val_end = input + strlen(input);
+
+    while (val_begin < val_end && isspace(*val_begin))
+      val_begin++;
+    while (val_end > val_begin && isspace(*(val_end - 1)))
+      val_end--;
+
+    ret = (char *) malloc(
+            sizeof(char) * (val_end - val_begin + 1));
+    if (ret == NULL) {
+      fprintf(ERRORFILE, "Allocation error\n");
+      exit(OUT_OF_MEMORY);
+    }
+
+    strncpy(ret, val_begin, val_end - val_begin);
+    ret[val_end - val_begin] = '\0';
+    return ret;
+}
 
 void read_config(const char* file_name, struct configuration *cfg) {
   FILE *conf_file;
@@ -155,7 +193,7 @@ void read_config(const char* file_name, struct configuration *cfg) {
       exit(OUT_OF_MEMORY);
     }
     size_read = getline(&line,&linesize,conf_file);
- 
+
     //feof returns true only after we read past EOF.
     //so a file with no new line, at last can reach this place
     //if size_read returns negative check for eof condition
@@ -197,9 +235,8 @@ void read_config(const char* file_name, struct configuration *cfg) {
     #endif
 
     memset(cfg->confdetails[cfg->size], 0, sizeof(struct confentry));
-    cfg->confdetails[cfg->size]->key = (char *) malloc(
-            sizeof(char) * (strlen(equaltok)+1));
-    strcpy((char *)cfg->confdetails[cfg->size]->key, equaltok);
+    cfg->confdetails[cfg->size]->key = trim(equaltok);
+
     equaltok = strtok_r(NULL, "=", &temp_equaltok);
     if (equaltok == NULL) {
       fprintf(LOGFILE, "configuration tokenization failed \n");
@@ -217,9 +254,7 @@ void read_config(const char* file_name, struct configuration *cfg) {
       fprintf(LOGFILE, "read_config : Adding conf value : %s \n", equaltok);
     #endif
 
-    cfg->confdetails[cfg->size]->value = (char *) malloc(
-            sizeof(char) * (strlen(equaltok)+1));
-    strcpy((char *)cfg->confdetails[cfg->size]->value, equaltok);
+    cfg->confdetails[cfg->size]->value = trim(equaltok);
     if((cfg->size + 1) % MAX_SIZE  == 0) {
       cfg->confdetails = (struct confentry **) realloc(cfg->confdetails,
           sizeof(struct confentry **) * (MAX_SIZE + cfg->size));
@@ -235,7 +270,7 @@ void read_config(const char* file_name, struct configuration *cfg) {
 
     free(line);
   }
- 
+
   //close the file
   fclose(conf_file);
 

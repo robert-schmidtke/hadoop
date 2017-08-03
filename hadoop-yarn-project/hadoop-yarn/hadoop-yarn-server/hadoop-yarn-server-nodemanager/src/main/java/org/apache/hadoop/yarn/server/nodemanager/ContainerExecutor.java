@@ -22,6 +22,8 @@ import java.io.File;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.io.PrintStream;
+import java.net.InetAddress;
+import java.net.UnknownHostException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
@@ -42,13 +44,14 @@ import org.apache.hadoop.conf.Configurable;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.permission.FsPermission;
-import org.apache.hadoop.yarn.api.ApplicationConstants;
 import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
+import org.apache.hadoop.yarn.exceptions.ConfigurationException;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.container.Container;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.container.ContainerDiagnosticsUpdateEvent;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.launcher.ContainerLaunch;
+import org.apache.hadoop.yarn.server.nodemanager.executor.ContainerPrepareContext;
 import org.apache.hadoop.yarn.server.nodemanager.util.NodeManagerHardwareUtils;
 import org.apache.hadoop.yarn.server.nodemanager.executor.ContainerLivenessContext;
 import org.apache.hadoop.yarn.server.nodemanager.executor.ContainerReacquisitionContext;
@@ -65,8 +68,8 @@ import org.apache.hadoop.util.StringUtils;
  * underlying OS.  All executor implementations must extend ContainerExecutor.
  */
 public abstract class ContainerExecutor implements Configurable {
-  private static final String WILDCARD = "*";
   private static final Log LOG = LogFactory.getLog(ContainerExecutor.class);
+  protected static final String WILDCARD = "*";
 
   /**
    * The permissions to use when creating the launch script.
@@ -147,6 +150,14 @@ public abstract class ContainerExecutor implements Configurable {
   public abstract void startLocalizer(LocalizerStartContext ctx)
     throws IOException, InterruptedException;
 
+  /**
+   * Prepare the container prior to the launch environment being written.
+   * @param ctx Encapsulates information necessary for launching containers.
+   * @throws IOException if errors occur during container preparation
+   */
+  public void prepareContainer(ContainerPrepareContext ctx) throws
+      IOException{
+  }
 
   /**
    * Launch the container on the node. This is a blocking call and returns only
@@ -154,9 +165,10 @@ public abstract class ContainerExecutor implements Configurable {
    * @param ctx Encapsulates information necessary for launching containers.
    * @return the return status of the launch
    * @throws IOException if the container launch fails
+   * @throws ConfigurationException if config error was found
    */
   public abstract int launchContainer(ContainerStartContext ctx) throws
-      IOException;
+      IOException, ConfigurationException;
 
   /**
    * Signal container with the specified signal.
@@ -178,6 +190,15 @@ public abstract class ContainerExecutor implements Configurable {
    */
   public abstract void deleteAsUser(DeletionAsUserContext ctx)
       throws IOException, InterruptedException;
+
+  /**
+   * Create a symlink file which points to the target.
+   * @param target The target for symlink
+   * @param symlink the symlink file
+   * @throws IOException Error when creating symlinks
+   */
+  public abstract void symLink(String target, String symlink)
+      throws IOException;
 
   /**
    * Check if a container is alive.
@@ -272,15 +293,16 @@ public abstract class ContainerExecutor implements Configurable {
    * @param environment the environment variables and their values
    * @param resources the resources which have been localized for this
    * container. Symlinks will be created to these localized resources
-   * @param command the command that will be run.
-   * @param logDir the log dir to copy debugging information to
+   * @param command the command that will be run
+   * @param logDir the log dir to which to copy debugging information
+   * @param user the username of the job owner
    * @throws IOException if any errors happened writing to the OutputStream,
    * while creating symlinks
    */
   public void writeLaunchEnv(OutputStream out, Map<String, String> environment,
-      Map<Path, List<String>> resources, List<String> command, Path logDir)
-      throws IOException {
-    this.writeLaunchEnv(out, environment, resources, command, logDir,
+      Map<Path, List<String>> resources, List<String> command, Path logDir,
+      String user) throws IOException {
+    this.writeLaunchEnv(out, environment, resources, command, logDir, user,
         ContainerLaunch.CONTAINER_SCRIPT);
   }
 
@@ -293,27 +315,26 @@ public abstract class ContainerExecutor implements Configurable {
    * @param environment the environment variables and their values
    * @param resources the resources which have been localized for this
    * container. Symlinks will be created to these localized resources
-   * @param command the command that will be run.
-   * @param logDir the log dir to copy debugging information to
+   * @param command the command that will be run
+   * @param logDir the log dir to which to copy debugging information
+   * @param user the username of the job owner
    * @param outFilename the path to which to write the launch environment
    * @throws IOException if any errors happened writing to the OutputStream,
    * while creating symlinks
    */
   @VisibleForTesting
-  public void writeLaunchEnv(OutputStream out,
-      Map<String, String> environment, Map<Path, List<String>> resources,
-      List<String> command, Path logDir, String outFilename)
-      throws IOException {
+  public void writeLaunchEnv(OutputStream out, Map<String, String> environment,
+      Map<Path, List<String>> resources, List<String> command, Path logDir,
+      String user, String outFilename) throws IOException {
     ContainerLaunch.ShellScriptBuilder sb =
         ContainerLaunch.ShellScriptBuilder.create();
     Set<String> whitelist = new HashSet<>();
 
-    whitelist.add(YarnConfiguration.NM_DOCKER_CONTAINER_EXECUTOR_IMAGE_NAME);
-    whitelist.add(ApplicationConstants.Environment.HADOOP_YARN_HOME.name());
-    whitelist.add(ApplicationConstants.Environment.HADOOP_COMMON_HOME.name());
-    whitelist.add(ApplicationConstants.Environment.HADOOP_HDFS_HOME.name());
-    whitelist.add(ApplicationConstants.Environment.HADOOP_CONF_DIR.name());
-    whitelist.add(ApplicationConstants.Environment.JAVA_HOME.name());
+    String[] nmWhiteList = conf.get(YarnConfiguration.NM_ENV_WHITELIST,
+        YarnConfiguration.DEFAULT_NM_ENV_WHITELIST).split(",");
+    for (String param : nmWhiteList) {
+      whitelist.add(param);
+    }
 
     if (environment != null) {
       for (Map.Entry<String, String> env : environment.entrySet()) {
@@ -332,9 +353,7 @@ public abstract class ContainerExecutor implements Configurable {
           if (new Path(linkName).getName().equals(WILDCARD)) {
             // If this is a wildcarded path, link to everything in the
             // directory from the working directory
-            File directory = new File(resourceEntry.getKey().toString());
-
-            for (File wildLink : directory.listFiles()) {
+            for (File wildLink : readDirAsUser(user, resourceEntry.getKey())) {
               sb.symlink(new Path(wildLink.toString()),
                   new Path(wildLink.getName()));
             }
@@ -366,6 +385,19 @@ public abstract class ContainerExecutor implements Configurable {
         out.close();
       }
     }
+  }
+
+  /**
+   * Return the files in the target directory. If retrieving the list of files
+   * requires specific access rights, that access will happen as the
+   * specified user. The list will not include entries for "." or "..".
+   *
+   * @param user the user as whom to access the target directory
+   * @param dir the target directory
+   * @return a list of files in the target directory
+   */
+  protected File[] readDirAsUser(String user, Path dir) {
+    return new File(dir.toString()).listFiles();
   }
 
   /**
@@ -624,6 +656,26 @@ public abstract class ContainerExecutor implements Configurable {
     } finally {
       writeLock.unlock();
     }
+  }
+
+  // LinuxContainerExecutor overrides this method and behaves differently.
+  public String[] getIpAndHost(Container container) {
+    return getLocalIpAndHost(container);
+  }
+
+  // ipAndHost[0] contains ip.
+  // ipAndHost[1] contains hostname.
+  public static String[] getLocalIpAndHost(Container container) {
+    String[] ipAndHost = new String[2];
+    try {
+      InetAddress address = InetAddress.getLocalHost();
+      ipAndHost[0] = address.getHostAddress();
+      ipAndHost[1] = address.getHostName();
+    } catch (UnknownHostException e) {
+      LOG.error("Unable to get Local hostname and ip for " + container
+          .getContainerId(), e);
+    }
+    return ipAndHost;
   }
 
   /**

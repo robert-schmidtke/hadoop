@@ -19,6 +19,8 @@ package org.apache.hadoop.fs.sftp;
 
 import java.io.IOException;
 import java.net.URI;
+import java.nio.file.Files;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -28,9 +30,9 @@ import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.LocalFileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.test.GenericTestUtils;
-import org.apache.hadoop.util.Shell;
 
 import org.apache.sshd.SshServer;
 import org.apache.sshd.common.NamedFactory;
@@ -48,8 +50,8 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TestName;
 
+import static org.apache.hadoop.test.PlatformAssumptions.assumeNotWindows;
 import static org.junit.Assert.*;
-import static org.junit.Assume.assumeTrue;
 
 public class TestSFTPFileSystem {
 
@@ -99,7 +101,7 @@ public class TestSFTPFileSystem {
   @BeforeClass
   public static void setUp() throws Exception {
     // skip all tests if running on Windows
-    assumeTrue(!Shell.WINDOWS);
+    assumeNotWindows();
 
     startSshdServer();
 
@@ -304,6 +306,27 @@ public class TestSFTPFileSystem {
     Path file1 = touch(localFs, name.getMethodName().toLowerCase() + "1");
     Path file2 = touch(localFs, name.getMethodName().toLowerCase() + "2");
     sftpFs.rename(file1, file2);
+  }
+
+  @Test
+  public void testGetAccessTime() throws IOException {
+    Path file = touch(localFs, name.getMethodName().toLowerCase());
+    LocalFileSystem local = (LocalFileSystem)localFs;
+    java.nio.file.Path path = (local).pathToFile(file).toPath();
+    long accessTime1 = Files.readAttributes(path, BasicFileAttributes.class)
+        .lastAccessTime().toMillis();
+    accessTime1 = (accessTime1 / 1000) * 1000;
+    long accessTime2 = sftpFs.getFileStatus(file).getAccessTime();
+    assertEquals(accessTime1, accessTime2);
+  }
+
+  @Test
+  public void testGetModifyTime() throws IOException {
+    Path file = touch(localFs, name.getMethodName().toLowerCase() + "1");
+    java.io.File localFile = ((LocalFileSystem) localFs).pathToFile(file);
+    long modifyTime1 = localFile.lastModified();
+    long modifyTime2 = sftpFs.getFileStatus(file).getModificationTime();
+    assertEquals(modifyTime1, modifyTime2);
   }
 
 }

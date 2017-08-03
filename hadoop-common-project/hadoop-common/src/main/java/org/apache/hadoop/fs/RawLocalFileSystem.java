@@ -208,9 +208,7 @@ public class RawLocalFileSystem extends FileSystem {
   
   @Override
   public FSDataInputStream open(Path f, int bufferSize) throws IOException {
-    if (!exists(f)) {
-      throw new FileNotFoundException(f.toString());
-    }
+    getFileStatus(f);
     return new FSDataInputStream(new BufferedFSInputStream(
         new LocalFSFileInputStream(f), bufferSize));
   }
@@ -278,9 +276,6 @@ public class RawLocalFileSystem extends FileSystem {
   @Override
   public FSDataOutputStream append(Path f, int bufferSize,
       Progressable progress) throws IOException {
-    if (!exists(f)) {
-      throw new FileNotFoundException("File " + f + " not found");
-    }
     FileStatus status = getFileStatus(f);
     if (status.isDirectory()) {
       throw new IOException("Cannot append to a diretory (=" + f + " )");
@@ -387,17 +382,21 @@ public class RawLocalFileSystem extends FileSystem {
     // platforms (notably Windows) do not provide this behavior, so the Java API
     // call renameTo(dstFile) fails. Delete destination and attempt rename
     // again.
-    if (this.exists(dst)) {
+    try {
       FileStatus sdst = this.getFileStatus(dst);
-      if (sdst.isDirectory() && dstFile.list().length == 0) {
-        if (LOG.isDebugEnabled()) {
-          LOG.debug("Deleting empty destination and renaming " + src + " to " +
-            dst);
-        }
-        if (this.delete(dst, false) && srcFile.renameTo(dstFile)) {
-          return true;
+      String[] dstFileList = dstFile.list();
+      if (dstFileList != null) {
+        if (sdst.isDirectory() && dstFileList.length == 0) {
+          if (LOG.isDebugEnabled()) {
+            LOG.debug("Deleting empty destination and renaming " + src +
+                " to " + dst);
+          }
+          if (this.delete(dst, false) && srcFile.renameTo(dstFile)) {
+            return true;
+          }
         }
       }
+    } catch (FileNotFoundException ignored) {
     }
     return false;
   }
@@ -466,10 +465,7 @@ public class RawLocalFileSystem extends FileSystem {
     }
 
     if (localf.isDirectory()) {
-      String[] names = localf.list();
-      if (names == null) {
-        return null;
-      }
+      String[] names = FileUtil.list(localf);
       results = new FileStatus[names.length];
       int j = 0;
       for (int i = 0; i < names.length; i++) {
@@ -559,7 +555,7 @@ public class RawLocalFileSystem extends FileSystem {
       }
     }
     if (p2f.exists() && !p2f.isDirectory()) {
-      throw new FileNotFoundException("Destination exists" +
+      throw new FileAlreadyExistsException("Destination exists" +
               " and is not a directory: " + p2f.getCanonicalPath());
     }
     return (parent == null || parent2f.exists() || mkdirs(parent)) &&

@@ -20,23 +20,36 @@ package org.apache.hadoop.fs.s3a;
 
 import org.apache.commons.lang.StringUtils;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileContext;
+import org.apache.hadoop.fs.Path;
 import org.junit.Assert;
+import org.junit.Assume;
 import org.junit.internal.AssumptionViolatedException;
 import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.net.URI;
-import java.util.concurrent.Callable;
+import java.util.List;
 
 import static org.apache.hadoop.fs.contract.ContractTestUtils.skip;
 import static org.apache.hadoop.fs.s3a.S3ATestConstants.*;
 import static org.apache.hadoop.fs.s3a.Constants.*;
+import static org.junit.Assert.*;
 
 /**
  * Utilities for the S3A tests.
  */
-public class S3ATestUtils {
+public final class S3ATestUtils {
+  private static final Logger LOG = LoggerFactory.getLogger(
+      S3ATestUtils.class);
+
+  /**
+   * Value to set a system property to (in maven) to declare that
+   * a property has been unset.
+   */
+  public static final String UNSET_PROPERTY = "unset";
 
   /**
    * Create the test filesystem.
@@ -52,8 +65,25 @@ public class S3ATestUtils {
    */
   public static S3AFileSystem createTestFileSystem(Configuration conf)
       throws IOException {
-    String fsname = conf.getTrimmed(TEST_FS_S3A_NAME, "");
+    return createTestFileSystem(conf, false);
+  }
 
+  /**
+   * Create the test filesystem with or without multipart purging
+   *
+   * If the test.fs.s3a.name property is not set, this will
+   * trigger a JUnit failure.
+   * @param conf configuration
+   * @param purge flag to enable Multipart purging
+   * @return the FS
+   * @throws IOException IO Problems
+   * @throws AssumptionViolatedException if the FS is not named
+   */
+  public static S3AFileSystem createTestFileSystem(Configuration conf,
+      boolean purge)
+      throws IOException {
+
+    String fsname = conf.getTrimmed(TEST_FS_S3A_NAME, "");
 
     boolean liveTest = !StringUtils.isEmpty(fsname);
     URI testURI = null;
@@ -69,8 +99,12 @@ public class S3ATestUtils {
     }
     S3AFileSystem fs1 = new S3AFileSystem();
     //enable purging in tests
-    conf.setBoolean(PURGE_EXISTING_MULTIPART, true);
-    conf.setInt(PURGE_EXISTING_MULTIPART_AGE, 0);
+    if (purge) {
+      conf.setBoolean(PURGE_EXISTING_MULTIPART, true);
+      // but a long delay so that parallel multipart tests don't
+      // suddenly start timing out
+      conf.setInt(PURGE_EXISTING_MULTIPART_AGE, 30 * 60);
+    }
     fs1.initialize(testURI, conf);
     return fs1;
   }
@@ -103,55 +137,123 @@ public class S3ATestUtils {
       throw new AssumptionViolatedException("No test filesystem in "
           + TEST_FS_S3A_NAME);
     }
-    FileContext fc = FileContext.getFileContext(testURI,conf);
+    FileContext fc = FileContext.getFileContext(testURI, conf);
     return fc;
   }
 
   /**
-   * Repeatedly attempt a callback until timeout or a {@link FailFastException}
-   * is raised. This is modeled on ScalaTests {@code eventually(Closure)} code.
-   * @param timeout timeout
-   * @param callback callback to invoke
-   * @throws FailFastException any fast-failure
-   * @throws Exception the exception which caused the iterator to fail
+   * Get a long test property.
+   * <ol>
+   *   <li>Look up configuration value (which can pick up core-default.xml),
+   *       using {@code defVal} as the default value (if conf != null).
+   *   </li>
+   *   <li>Fetch the system property.</li>
+   *   <li>If the system property is not empty or "(unset)":
+   *   it overrides the conf value.
+   *   </li>
+   * </ol>
+   * This puts the build properties in charge of everything. It's not a
+   * perfect design; having maven set properties based on a file, as ant let
+   * you do, is better for customization.
+   *
+   * As to why there's a special (unset) value, see
+   * {@link http://stackoverflow.com/questions/7773134/null-versus-empty-arguments-in-maven}
+   * @param conf config: may be null
+   * @param key key to look up
+   * @param defVal default value
+   * @return the evaluated test property.
    */
-  public static void eventually(int timeout, Callable<Void> callback)
-      throws Exception {
-    Exception lastException;
-    long endtime = System.currentTimeMillis() + timeout;
-    do {
-      try {
-        callback.call();
-        return;
-      } catch (FailFastException e) {
-        throw e;
-      } catch (Exception e) {
-        lastException = e;
-      }
-      Thread.sleep(500);
-    } while (endtime > System.currentTimeMillis());
-    throw lastException;
+  public static long getTestPropertyLong(Configuration conf,
+      String key, long defVal) {
+    return Long.valueOf(
+        getTestProperty(conf, key, Long.toString(defVal)));
+  }
+  /**
+   * Get a test property value in bytes, using k, m, g, t, p, e suffixes.
+   * {@link org.apache.hadoop.util.StringUtils.TraditionalBinaryPrefix#string2long(String)}
+   * <ol>
+   *   <li>Look up configuration value (which can pick up core-default.xml),
+   *       using {@code defVal} as the default value (if conf != null).
+   *   </li>
+   *   <li>Fetch the system property.</li>
+   *   <li>If the system property is not empty or "(unset)":
+   *   it overrides the conf value.
+   *   </li>
+   * </ol>
+   * This puts the build properties in charge of everything. It's not a
+   * perfect design; having maven set properties based on a file, as ant let
+   * you do, is better for customization.
+   *
+   * As to why there's a special (unset) value, see
+   * {@link http://stackoverflow.com/questions/7773134/null-versus-empty-arguments-in-maven}
+   * @param conf config: may be null
+   * @param key key to look up
+   * @param defVal default value
+   * @return the evaluated test property.
+   */
+  public static long getTestPropertyBytes(Configuration conf,
+      String key, String defVal) {
+    return org.apache.hadoop.util.StringUtils.TraditionalBinaryPrefix
+        .string2long(getTestProperty(conf, key, defVal));
   }
 
   /**
-   * The exception to raise so as to exit fast from
-   * {@link #eventually(int, Callable)}.
+   * Get an integer test property; algorithm described in
+   * {@link #getTestPropertyLong(Configuration, String, long)}.
+   * @param key key to look up
+   * @param defVal default value
+   * @return the evaluated test property.
    */
-  public static class FailFastException extends Exception {
-    public FailFastException() {
-    }
+  public static int getTestPropertyInt(Configuration conf,
+      String key, int defVal) {
+    return (int) getTestPropertyLong(conf, key, defVal);
+  }
 
-    public FailFastException(String message) {
-      super(message);
-    }
+  /**
+   * Get a boolean test property; algorithm described in
+   * {@link #getTestPropertyLong(Configuration, String, long)}.
+   * @param key key to look up
+   * @param defVal default value
+   * @return the evaluated test property.
+   */
+  public static boolean getTestPropertyBool(Configuration conf,
+      String key,
+      boolean defVal) {
+    return Boolean.valueOf(
+        getTestProperty(conf, key, Boolean.toString(defVal)));
+  }
 
-    public FailFastException(String message, Throwable cause) {
-      super(message, cause);
-    }
+  /**
+   * Get a string test property.
+   * <ol>
+   *   <li>Look up configuration value (which can pick up core-default.xml),
+   *       using {@code defVal} as the default value (if conf != null).
+   *   </li>
+   *   <li>Fetch the system property.</li>
+   *   <li>If the system property is not empty or "(unset)":
+   *   it overrides the conf value.
+   *   </li>
+   * </ol>
+   * This puts the build properties in charge of everything. It's not a
+   * perfect design; having maven set properties based on a file, as ant let
+   * you do, is better for customization.
+   *
+   * As to why there's a special (unset) value, see
+   * @see <a href="http://stackoverflow.com/questions/7773134/null-versus-empty-arguments-in-maven">
+   *   Stack Overflow</a>
+   * @param conf config: may be null
+   * @param key key to look up
+   * @param defVal default value
+   * @return the evaluated test property.
+   */
 
-    public FailFastException(Throwable cause) {
-      super(cause);
-    }
+  public static String getTestProperty(Configuration conf,
+      String key,
+      String defVal) {
+    String confVal = conf != null ? conf.getTrimmed(key, defVal) : defVal;
+    String propval = System.getProperty(key);
+    return StringUtils.isNotEmpty(propval) && !UNSET_PROPERTY.equals(propval)
+        ? propval : confVal;
   }
 
   /**
@@ -190,6 +292,19 @@ public class S3ATestUtils {
     if (!configuration.getBoolean(KEY_ENCRYPTION_TESTS, true)) {
       skip("Skipping encryption tests");
     }
+  }
+
+  /**
+   * Create a test path, using the value of
+   * {@link S3ATestConstants#TEST_UNIQUE_FORK_ID} if it is set.
+   * @param defVal default value
+   * @return a path
+   */
+  public static Path createTestPath(Path defVal) {
+    String testUniqueForkId = System.getProperty(
+        S3ATestConstants.TEST_UNIQUE_FORK_ID);
+    return testUniqueForkId == null ? defVal :
+        new Path("/" + testUniqueForkId, "test");
   }
 
   /**
@@ -283,11 +398,20 @@ public class S3ATestUtils {
 
     /**
      * Assert that the value of {@link #diff()} matches that expected.
+     * @param message message to print; metric name is appended
+     * @param expected expected value.
+     */
+    public void assertDiffEquals(String message, long expected) {
+      Assert.assertEquals(message + ": " + statistic.getSymbol(),
+          expected, diff());
+    }
+
+    /**
+     * Assert that the value of {@link #diff()} matches that expected.
      * @param expected expected value.
      */
     public void assertDiffEquals(long expected) {
-      Assert.assertEquals("Count of " + this,
-          expected, diff());
+      assertDiffEquals("Count of " + this, expected);
     }
 
     /**
@@ -306,7 +430,7 @@ public class S3ATestUtils {
      * @return true if the value is {@code ==} the other's
      */
     public boolean diffEquals(MetricDiff that) {
-      return this.currentValue() == that.currentValue();
+      return this.diff() == that.diff();
     }
 
     /**
@@ -315,7 +439,7 @@ public class S3ATestUtils {
      * @return true if the value is {@code <} the other's
      */
     public boolean diffLessThan(MetricDiff that) {
-      return this.currentValue() < that.currentValue();
+      return this.diff() < that.diff();
     }
 
     /**
@@ -324,11 +448,11 @@ public class S3ATestUtils {
      * @return true if the value is {@code <=} the other's
      */
     public boolean diffLessThanOrEquals(MetricDiff that) {
-      return this.currentValue() <= that.currentValue();
+      return this.diff() <= that.diff();
     }
 
     /**
-     * Get the statistic
+     * Get the statistic.
      * @return the statistic
      */
     public Statistic getStatistic() {
@@ -342,5 +466,95 @@ public class S3ATestUtils {
     public long getStartingValue() {
       return startingValue;
     }
+  }
+
+  /**
+   * Asserts that {@code obj} is an instance of {@code expectedClass} using a
+   * descriptive assertion message.
+   * @param expectedClass class
+   * @param obj object to check
+   */
+  public static void assertInstanceOf(Class<?> expectedClass, Object obj) {
+    Assert.assertTrue(String.format("Expected instance of class %s, but is %s.",
+        expectedClass, obj.getClass()),
+        expectedClass.isAssignableFrom(obj.getClass()));
+  }
+
+  /**
+   * Builds a comma-separated list of class names.
+   * @param classes list of classes
+   * @return comma-separated list of class names
+   */
+  public static <T extends Class<?>> String buildClassListString(
+      List<T> classes) {
+    StringBuilder sb = new StringBuilder();
+    for (int i = 0; i < classes.size(); ++i) {
+      if (i > 0) {
+        sb.append(',');
+      }
+      sb.append(classes.get(i).getName());
+    }
+    return sb.toString();
+  }
+
+  /**
+   * This class should not be instantiated.
+   */
+  private S3ATestUtils() {
+  }
+
+  /**
+   * Set a bucket specific property to a particular value.
+   * If the generic key passed in has an {@code fs.s3a. prefix},
+   * that's stripped off, so that when the the bucket properties are propagated
+   * down to the generic values, that value gets copied down.
+   * @param conf configuration to set
+   * @param bucket bucket name
+   * @param genericKey key; can start with "fs.s3a."
+   * @param value value to set
+   */
+  public static void setBucketOption(Configuration conf, String bucket,
+      String genericKey, String value) {
+    final String baseKey = genericKey.startsWith(FS_S3A_PREFIX) ?
+        genericKey.substring(FS_S3A_PREFIX.length())
+        : genericKey;
+    conf.set(FS_S3A_BUCKET_PREFIX + bucket + '.' + baseKey, value);
+  }
+
+  /**
+   * Assert that a configuration option matches the expected value.
+   * @param conf configuration
+   * @param key option key
+   * @param expected expected value
+   */
+  public static void assertOptionEquals(Configuration conf,
+      String key,
+      String expected) {
+    assertEquals("Value of " + key, expected, conf.get(key));
+  }
+
+  /**
+   * Assume that a condition is met. If not: log at WARN and
+   * then throw an {@link AssumptionViolatedException}.
+   * @param message
+   * @param condition
+   */
+  public static void assume(String message, boolean condition) {
+    if (!condition) {
+      LOG.warn(message);
+    }
+    Assume.assumeTrue(message, condition);
+  }
+
+  /**
+   * Get the statistics from a wrapped block output stream.
+   * @param out output stream
+   * @return the (active) stats of the write
+   */
+  public static S3AInstrumentation.OutputStreamStatistics
+      getOutputStreamStatistics(FSDataOutputStream out) {
+    S3ABlockOutputStream blockOutputStream
+        = (S3ABlockOutputStream) out.getWrappedStream();
+    return blockOutputStream.getStatistics();
   }
 }

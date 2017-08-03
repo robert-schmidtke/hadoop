@@ -38,6 +38,7 @@ import org.apache.hadoop.hdfs.DFSTestUtil;
 import org.apache.hadoop.hdfs.HdfsConfiguration;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.hdfs.StripedFileTestUtil;
+import org.apache.hadoop.hdfs.protocol.ErasureCodingPolicy;
 import org.apache.hadoop.hdfs.protocol.LocatedBlock;
 import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
 import org.apache.hadoop.test.GenericTestUtils;
@@ -56,11 +57,13 @@ public class TestSequentialBlockGroupId {
   private static final Log LOG = LogFactory
       .getLog("TestSequentialBlockGroupId");
 
+  private final ErasureCodingPolicy ecPolicy =
+      StripedFileTestUtil.getDefaultECPolicy();
   private final short REPLICATION = 1;
   private final long SEED = 0;
-  private final int dataBlocks = StripedFileTestUtil.NUM_DATA_BLOCKS;
-  private final int parityBlocks = StripedFileTestUtil.NUM_PARITY_BLOCKS;
-  private final int cellSize = StripedFileTestUtil.BLOCK_STRIPED_CELL_SIZE;
+  private final int dataBlocks = ecPolicy.getNumDataUnits();
+  private final int parityBlocks = ecPolicy.getNumParityUnits();
+  private final int cellSize = ecPolicy.getCellSize();
 
   private final int stripesPerBlock = 2;
   private final int blockSize = cellSize * stripesPerBlock;
@@ -78,6 +81,8 @@ public class TestSequentialBlockGroupId {
     Configuration conf = new HdfsConfiguration();
     conf.setInt(DFSConfigKeys.DFS_REPLICATION_KEY, 1);
     conf.setLong(DFSConfigKeys.DFS_BLOCK_SIZE_KEY, blockSize);
+    conf.set(DFSConfigKeys.DFS_NAMENODE_EC_POLICIES_ENABLED_KEY,
+        StripedFileTestUtil.getDefaultECPolicy().getName());
     cluster = new MiniDFSCluster.Builder(conf).numDataNodes(numDNs).build();
     cluster.waitActive();
 
@@ -85,8 +90,8 @@ public class TestSequentialBlockGroupId {
     blockGrpIdGenerator = cluster.getNamesystem().getBlockManager()
         .getBlockIdManager().getBlockGroupIdGenerator();
     fs.mkdirs(ecDir);
-    cluster.getFileSystem().getClient()
-        .setErasureCodingPolicy("/ecDir", null);
+    cluster.getFileSystem().getClient().setErasureCodingPolicy("/ecDir",
+        StripedFileTestUtil.getDefaultECPolicy().getName());
   }
 
   @After
@@ -124,6 +129,11 @@ public class TestSequentialBlockGroupId {
       assertThat("BlockGrpId mismatches!", nextBlockGrpId,
           is(nextBlockExpectedId));
     }
+
+    // verify that the blockGroupId resets on #clear call.
+    cluster.getNamesystem().getBlockManager().clear();
+    assertThat("BlockGrpId mismatches!", blockGrpIdGenerator.getCurrentValue(),
+        is(Long.MIN_VALUE));
   }
 
   /**

@@ -17,31 +17,28 @@
  */
 package org.apache.hadoop.crypto.key.kms.server;
 
+import java.io.File;
+import java.io.IOException;
+import java.net.URI;
+import java.net.URL;
+
+import javax.servlet.ServletContextEvent;
+import javax.servlet.ServletContextListener;
+
 import com.codahale.metrics.JmxReporter;
 import com.codahale.metrics.Meter;
 import com.codahale.metrics.MetricRegistry;
-
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.crypto.key.CachingKeyProvider;
 import org.apache.hadoop.crypto.key.KeyProvider;
 import org.apache.hadoop.crypto.key.KeyProviderCryptoExtension;
 import org.apache.hadoop.crypto.key.KeyProviderFactory;
-import org.apache.hadoop.http.HttpServer2;
-import org.apache.hadoop.security.authorize.AccessControlList;
+import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.util.VersionInfo;
 import org.apache.log4j.PropertyConfigurator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.slf4j.bridge.SLF4JBridgeHandler;
-
-import javax.servlet.ServletContextEvent;
-import javax.servlet.ServletContextListener;
-
-import java.io.File;
-import java.net.URI;
-import java.net.URL;
-import java.util.List;
 
 @InterfaceAudience.Private
 public class KMSWebApp implements ServletContextListener {
@@ -80,11 +77,6 @@ public class KMSWebApp implements ServletContextListener {
   private static KMSAudit kmsAudit;
   private static KeyProviderCryptoExtension keyProviderCryptoExtension;
 
-  static {
-    SLF4JBridgeHandler.removeHandlersForRootLogger();
-    SLF4JBridgeHandler.install();
-  }
-
   private void initLogging(String confDir) {
     if (System.getProperty("log4j.configuration") == null) {
       System.setProperty("log4j.defaultInitOverride", "true");
@@ -121,6 +113,7 @@ public class KMSWebApp implements ServletContextListener {
       }
       kmsConf = KMSConfiguration.getKMSConf();
       initLogging(confDir);
+      UserGroupInformation.setConfiguration(kmsConf);
       LOG.info("-------------------------------------------------------------");
       LOG.info("  Java runtime version : {}", System.getProperty(
           "java.runtime.version"));
@@ -147,18 +140,7 @@ public class KMSWebApp implements ServletContextListener {
       unauthenticatedCallsMeter = metricRegistry.register(
           UNAUTHENTICATED_CALLS_METER, new Meter());
 
-      kmsAudit =
-          new KMSAudit(kmsConf.getLong(
-              KMSConfiguration.KMS_AUDIT_AGGREGATION_WINDOW,
-              KMSConfiguration.KMS_AUDIT_AGGREGATION_WINDOW_DEFAULT));
-
-      // this is required for the the JMXJsonServlet to work properly.
-      // the JMXJsonServlet is behind the authentication filter,
-      // thus the '*' ACL.
-      sce.getServletContext().setAttribute(HttpServer2.CONF_CONTEXT_ATTRIBUTE,
-          kmsConf);
-      sce.getServletContext().setAttribute(HttpServer2.ADMINS_ACL,
-          new AccessControlList(AccessControlList.WILDCARD_ACL_VALUE));
+      kmsAudit = new KMSAudit(kmsConf);
 
       // intializing the KeyProvider
       String providerString = kmsConf.get(KMSConfiguration.KEY_PROVIDER_URI);
@@ -216,6 +198,11 @@ public class KMSWebApp implements ServletContextListener {
 
   @Override
   public void contextDestroyed(ServletContextEvent sce) {
+    try {
+      keyProviderCryptoExtension.close();
+    } catch (IOException ioe) {
+      LOG.error("Error closing KeyProviderCryptoExtension", ioe);
+    }
     kmsAudit.shutdown();
     kmsAcls.stopReloader();
     jmxReporter.stop();

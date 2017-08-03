@@ -18,12 +18,22 @@
 package org.apache.hadoop.hdfs.server.namenode;
 
 import org.apache.hadoop.classification.InterfaceAudience;
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.hdfs.DFSConfigKeys;
+import org.apache.hadoop.hdfs.protocol.IllegalECPolicyException;
+import org.apache.hadoop.hdfs.protocol.SystemErasureCodingPolicies;
 import org.apache.hadoop.hdfs.protocol.ErasureCodingPolicy;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
-import org.apache.hadoop.io.erasurecode.ErasureCodeConstants;
 
+import org.apache.hadoop.io.erasurecode.CodecUtil;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 /**
  * This manages erasure coding policies predefined and activated in the system.
@@ -35,41 +45,90 @@ import java.util.TreeMap;
 @InterfaceAudience.LimitedPrivate({"HDFS"})
 public final class ErasureCodingPolicyManager {
 
-  /**
-   * TODO: HDFS-8095
-   */
-  private static final int DEFAULT_CELLSIZE = 64 * 1024;
-  private static final ErasureCodingPolicy SYS_POLICY1 =
-      new ErasureCodingPolicy(ErasureCodeConstants.RS_6_3_SCHEMA,
-          DEFAULT_CELLSIZE, HdfsConstants.RS_6_3_POLICY_ID);
-  private static final ErasureCodingPolicy SYS_POLICY2 =
-      new ErasureCodingPolicy(ErasureCodeConstants.RS_3_2_SCHEMA,
-          DEFAULT_CELLSIZE, HdfsConstants.RS_3_2_POLICY_ID);
-  private static final ErasureCodingPolicy SYS_POLICY3 =
-      new ErasureCodingPolicy(ErasureCodeConstants.RS_6_3_LEGACY_SCHEMA,
-          DEFAULT_CELLSIZE, HdfsConstants.RS_6_3_LEGACY_POLICY_ID);
-
-  //We may add more later.
-  private static final ErasureCodingPolicy[] SYS_POLICIES =
-      new ErasureCodingPolicy[]{SYS_POLICY1, SYS_POLICY2, SYS_POLICY3};
+  public static Logger LOG = LoggerFactory.getLogger(
+      ErasureCodingPolicyManager.class);
+  private static final byte USER_DEFINED_POLICY_START_ID = (byte) 64;
+  private int maxCellSize =
+      DFSConfigKeys.DFS_NAMENODE_EC_POLICIES_MAX_CELLSIZE_DEFAULT;
 
   // Supported storage policies for striped EC files
-  private static final byte[] SUITABLE_STORAGE_POLICIES_FOR_EC_STRIPED_MODE = new byte[] {
-      HdfsConstants.HOT_STORAGE_POLICY_ID, HdfsConstants.COLD_STORAGE_POLICY_ID,
-      HdfsConstants.ALLSSD_STORAGE_POLICY_ID };
+  private static final byte[] SUITABLE_STORAGE_POLICIES_FOR_EC_STRIPED_MODE =
+      new byte[]{
+          HdfsConstants.HOT_STORAGE_POLICY_ID,
+          HdfsConstants.COLD_STORAGE_POLICY_ID,
+          HdfsConstants.ALLSSD_STORAGE_POLICY_ID};
 
   /**
-   * All active policies maintained in NN memory for fast querying,
+   * All user defined policies sorted by name for fast querying.
+   */
+  private Map<String, ErasureCodingPolicy> userPoliciesByName;
+
+  /**
+   * All user defined policies sorted by ID for fast querying.
+   */
+  private Map<Byte, ErasureCodingPolicy> userPoliciesByID;
+
+  /**
+   * All removed policies sorted by name.
+   */
+  private Map<String, ErasureCodingPolicy> removedPoliciesByName;
+
+  /**
+   * All enabled policies maintained in NN memory for fast querying,
    * identified and sorted by its name.
    */
-  private final Map<String, ErasureCodingPolicy> activePoliciesByName;
+  private Map<String, ErasureCodingPolicy> enabledPoliciesByName;
 
-  ErasureCodingPolicyManager() {
+  private volatile static ErasureCodingPolicyManager instance = null;
 
-    this.activePoliciesByName = new TreeMap<>();
-    for (ErasureCodingPolicy policy : SYS_POLICIES) {
-      activePoliciesByName.put(policy.getName(), policy);
+  public static ErasureCodingPolicyManager getInstance() {
+    if (instance == null) {
+      instance = new ErasureCodingPolicyManager();
     }
+    return instance;
+  }
+
+  private ErasureCodingPolicyManager() {}
+
+  public void init(Configuration conf) {
+    // Populate the list of enabled policies from configuration
+    final String[] policyNames = conf.getTrimmedStrings(
+        DFSConfigKeys.DFS_NAMENODE_EC_POLICIES_ENABLED_KEY,
+        DFSConfigKeys.DFS_NAMENODE_EC_POLICIES_ENABLED_DEFAULT);
+    this.userPoliciesByID = new TreeMap<>();
+    this.userPoliciesByName = new TreeMap<>();
+    this.removedPoliciesByName = new TreeMap<>();
+    this.enabledPoliciesByName = new TreeMap<>();
+    for (String policyName : policyNames) {
+      if (policyName.trim().isEmpty()) {
+        continue;
+      }
+      ErasureCodingPolicy ecPolicy =
+          SystemErasureCodingPolicies.getByName(policyName);
+      if (ecPolicy == null) {
+        ecPolicy = userPoliciesByName.get(policyName);
+        if (ecPolicy == null) {
+          String allPolicies = SystemErasureCodingPolicies.getPolicies()
+              .stream().map(ErasureCodingPolicy::getName)
+              .collect(Collectors.joining(", ")) + ", " +
+              userPoliciesByName.values().stream()
+              .map(ErasureCodingPolicy::getName)
+              .collect(Collectors.joining(", "));
+          String msg = String.format("EC policy '%s' specified at %s is not a "
+              + "valid policy. Please choose from list of available "
+              + "policies: [%s]",
+              policyName,
+              DFSConfigKeys.DFS_NAMENODE_EC_POLICIES_ENABLED_KEY,
+              allPolicies);
+          throw new IllegalArgumentException(msg);
+        }
+      }
+      enabledPoliciesByName.put(ecPolicy.getName(), ecPolicy);
+    }
+
+    maxCellSize = conf.getInt(
+        DFSConfigKeys.DFS_NAMENODE_EC_POLICIES_MAX_CELLSIZE_KEY,
+        DFSConfigKeys.DFS_NAMENODE_EC_POLICIES_MAX_CELLSIZE_DEFAULT);
 
     /**
      * TODO: HDFS-7859 persist into NameNode
@@ -79,54 +138,25 @@ public final class ErasureCodingPolicyManager {
   }
 
   /**
-   * Get system defined policies.
-   * @return system policies
-   */
-  public static ErasureCodingPolicy[] getSystemPolicies() {
-    return SYS_POLICIES;
-  }
-
-  /**
-   * Get system-wide default policy, which can be used by default
-   * when no policy is specified for a path.
-   * @return ecPolicy
-   */
-  public static ErasureCodingPolicy getSystemDefaultPolicy() {
-    // make this configurable?
-    return SYS_POLICY1;
-  }
-
-  /**
-   * Get all policies that's available to use.
+   * Get the set of enabled policies.
    * @return all policies
    */
-  public ErasureCodingPolicy[] getPolicies() {
+  public ErasureCodingPolicy[] getEnabledPolicies() {
     ErasureCodingPolicy[] results =
-        new ErasureCodingPolicy[activePoliciesByName.size()];
-    return activePoliciesByName.values().toArray(results);
+        new ErasureCodingPolicy[enabledPoliciesByName.size()];
+    return enabledPoliciesByName.values().toArray(results);
   }
 
   /**
-   * Get the policy specified by the policy name.
+   * Get enabled policy by policy name.
    */
-  public ErasureCodingPolicy getPolicyByName(String name) {
-    return activePoliciesByName.get(name);
+  public ErasureCodingPolicy getEnabledPolicyByName(String name) {
+    return enabledPoliciesByName.get(name);
   }
 
   /**
-   * Get the policy specified by the policy ID.
-   */
-  public ErasureCodingPolicy getPolicyByID(byte id) {
-    for (ErasureCodingPolicy policy : activePoliciesByName.values()) {
-      if (policy.getId() == id) {
-        return policy;
-      }
-    }
-    return null;
-  }
-
-  /**
-   * @return True if given policy is be suitable for striped EC Files.
+   * @return if the specified storage policy ID is suitable for striped EC
+   * files.
    */
   public static boolean checkStoragePolicySuitableForECStripedMode(
       byte storagePolicyID) {
@@ -141,9 +171,157 @@ public final class ErasureCodingPolicyManager {
   }
 
   /**
-   * Clear and clean up
+   * Get all system defined policies and user defined policies.
+   * @return all policies
+   */
+  public ErasureCodingPolicy[] getPolicies() {
+    return Stream.concat(SystemErasureCodingPolicies.getPolicies().stream(),
+        userPoliciesByName.values().stream())
+        .toArray(ErasureCodingPolicy[]::new);
+  }
+
+  /**
+   * Get a policy by policy ID, including system policy and user defined policy.
+   * @return ecPolicy, or null if not found
+   */
+  public ErasureCodingPolicy getByID(byte id) {
+    ErasureCodingPolicy policy = SystemErasureCodingPolicies.getByID(id);
+    if (policy == null) {
+      return this.userPoliciesByID.get(id);
+    }
+    return policy;
+  }
+
+  /**
+   * Get a policy by policy ID, including system policy and user defined policy.
+   * @return ecPolicy, or null if not found
+   */
+  public ErasureCodingPolicy getByName(String name) {
+    ErasureCodingPolicy policy = SystemErasureCodingPolicies.getByName(name);
+    if (policy == null) {
+      return this.userPoliciesByName.get(name);
+    }
+    return policy;
+  }
+
+  /**
+   * Clear and clean up.
    */
   public void clear() {
-    activePoliciesByName.clear();
+    // TODO: we should only clear policies loaded from NN metadata.
+    // This is a placeholder for HDFS-7337.
   }
+
+  /**
+   * Add an erasure coding policy.
+   * @return the added policy
+   */
+  public synchronized ErasureCodingPolicy addPolicy(ErasureCodingPolicy policy)
+      throws IllegalECPolicyException {
+    if (!CodecUtil.hasCodec(policy.getCodecName())) {
+      throw new IllegalECPolicyException("Codec name "
+          + policy.getCodecName() + " is not supported");
+    }
+
+    if (policy.getCellSize() > maxCellSize) {
+      throw new IllegalECPolicyException("Cell size " + policy.getCellSize()
+          + " should not exceed maximum " + maxCellSize + " byte");
+    }
+
+    String assignedNewName = ErasureCodingPolicy.composePolicyName(
+        policy.getSchema(), policy.getCellSize());
+    for (ErasureCodingPolicy p : getPolicies()) {
+      if (p.getName().equals(assignedNewName)) {
+        throw new IllegalECPolicyException("The policy name " + assignedNewName
+            + " already exists");
+      }
+      if (p.getSchema().equals(policy.getSchema()) &&
+          p.getCellSize() == policy.getCellSize()) {
+        throw new IllegalECPolicyException("A policy with same schema "
+            + policy.getSchema().toString() + " and cell size "
+            + p.getCellSize() + " is already exists");
+      }
+    }
+    policy.setName(assignedNewName);
+    policy.setId(getNextAvailablePolicyID());
+    this.userPoliciesByName.put(policy.getName(), policy);
+    this.userPoliciesByID.put(policy.getId(), policy);
+    return policy;
+  }
+
+  private byte getNextAvailablePolicyID() {
+    byte currentId = this.userPoliciesByID.keySet().stream()
+        .max(Byte::compareTo).orElse(USER_DEFINED_POLICY_START_ID);
+    return (byte) (currentId + 1);
+  }
+
+  /**
+   * Remove an User erasure coding policy by policyName.
+   */
+  public synchronized void removePolicy(String name) {
+    if (SystemErasureCodingPolicies.getByName(name) != null) {
+      throw new IllegalArgumentException("System erasure coding policy " +
+          name + " cannot be removed");
+    }
+    ErasureCodingPolicy policy = userPoliciesByName.get(name);
+    if (policy == null) {
+      throw new IllegalArgumentException("The policy name " +
+          name + " does not exists");
+    }
+    enabledPoliciesByName.remove(name);
+    removedPoliciesByName.put(name, policy);
+  }
+
+  public List<ErasureCodingPolicy> getRemovedPolicies() {
+    return removedPoliciesByName.values().stream().collect(Collectors.toList());
+  }
+
+  /**
+   * Disable an erasure coding policy by policyName.
+   */
+  public synchronized void disablePolicy(String name) {
+    ErasureCodingPolicy sysEcPolicy = SystemErasureCodingPolicies
+        .getByName(name);
+    ErasureCodingPolicy userEcPolicy = userPoliciesByName.get(name);
+    LOG.info("Disable the erasure coding policy " + name);
+    if (sysEcPolicy == null &&
+        userEcPolicy == null) {
+      throw new IllegalArgumentException("The policy name " +
+          name + " does not exists");
+    }
+
+    if(sysEcPolicy != null){
+      enabledPoliciesByName.remove(name);
+      removedPoliciesByName.put(name, sysEcPolicy);
+    }
+    if(userEcPolicy != null){
+      enabledPoliciesByName.remove(name);
+      removedPoliciesByName.put(name, userEcPolicy);
+    }
+  }
+
+  /**
+   * Enable an erasure coding policy by policyName.
+   */
+  public synchronized void enablePolicy(String name) {
+    ErasureCodingPolicy sysEcPolicy = SystemErasureCodingPolicies
+        .getByName(name);
+    ErasureCodingPolicy userEcPolicy = userPoliciesByName.get(name);
+    LOG.info("Enable the erasure coding policy " + name);
+    if (sysEcPolicy == null &&
+        userEcPolicy == null) {
+      throw new IllegalArgumentException("The policy name " +
+          name + " does not exists");
+    }
+
+    if(sysEcPolicy != null){
+      enabledPoliciesByName.put(name, sysEcPolicy);
+      removedPoliciesByName.remove(name);
+    }
+    if(userEcPolicy != null) {
+      enabledPoliciesByName.put(name, userEcPolicy);
+      removedPoliciesByName.remove(name);
+    }
+  }
+
 }

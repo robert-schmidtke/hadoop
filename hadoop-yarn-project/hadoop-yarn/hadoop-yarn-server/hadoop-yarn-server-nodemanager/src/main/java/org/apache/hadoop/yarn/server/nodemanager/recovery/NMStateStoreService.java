@@ -60,6 +60,13 @@ public abstract class NMStateStoreService extends AbstractService {
 
   }
 
+  /**
+   * Type of post recovery action.
+   */
+  public enum RecoveredContainerType {
+    KILL, RECOVER
+  }
+
   public enum RecoveredContainerStatus {
     REQUESTED,
     QUEUED,
@@ -77,6 +84,9 @@ public abstract class NMStateStoreService extends AbstractService {
     private int remainingRetryAttempts = ContainerRetryContext.RETRY_INVALID;
     private String workDir;
     private String logDir;
+    int version;
+    private RecoveredContainerType recoveryType =
+        RecoveredContainerType.RECOVER;
 
     public RecoveredContainerStatus getStatus() {
       return status;
@@ -92,6 +102,10 @@ public abstract class NMStateStoreService extends AbstractService {
 
     public String getDiagnostics() {
       return diagnostics;
+    }
+
+    public int getVersion() {
+      return version;
     }
 
     public StartContainerRequest getStartRequest() {
@@ -130,6 +144,7 @@ public abstract class NMStateStoreService extends AbstractService {
     public String toString() {
       return new StringBuffer("Status: ").append(getStatus())
           .append(", Exit code: ").append(exitCode)
+          .append(", Version: ").append(version)
           .append(", Killed: ").append(getKilled())
           .append(", Diagnostics: ").append(getDiagnostics())
           .append(", Capability: ").append(getCapability())
@@ -138,6 +153,14 @@ public abstract class NMStateStoreService extends AbstractService {
           .append(", WorkDir: ").append(workDir)
           .append(", LogDir: ").append(logDir)
           .toString();
+    }
+
+    public RecoveredContainerType getRecoveryType() {
+      return recoveryType;
+    }
+
+    public void setRecoveryType(RecoveredContainerType recoveryType) {
+      this.recoveryType = recoveryType;
     }
   }
 
@@ -243,6 +266,41 @@ public abstract class NMStateStoreService extends AbstractService {
     }
   }
 
+  /**
+   * Recovered states for AMRMProxy.
+   */
+  public static class RecoveredAMRMProxyState {
+    private MasterKey currentMasterKey;
+    private MasterKey nextMasterKey;
+    // For each app, stores amrmToken, user name, as well as various AMRMProxy
+    // intercepter states
+    private Map<ApplicationAttemptId, Map<String, byte[]>> appContexts;
+
+    public RecoveredAMRMProxyState() {
+      appContexts = new HashMap<>();
+    }
+
+    public MasterKey getCurrentMasterKey() {
+      return currentMasterKey;
+    }
+
+    public MasterKey getNextMasterKey() {
+      return nextMasterKey;
+    }
+
+    public Map<ApplicationAttemptId, Map<String, byte[]>> getAppContexts() {
+      return appContexts;
+    }
+
+    public void setCurrentMasterKey(MasterKey currentKey) {
+      currentMasterKey = currentKey;
+    }
+
+    public void setNextMasterKey(MasterKey nextKey) {
+      nextMasterKey = nextKey;
+    }
+  }
+
   /** Initialize the state storage */
   @Override
   public void serviceInit(Configuration conf) throws IOException {
@@ -306,11 +364,13 @@ public abstract class NMStateStoreService extends AbstractService {
   /**
    * Record a container start request
    * @param containerId the container ID
+   * @param containerVersion the container Version
    * @param startRequest the container start request
    * @throws IOException
    */
   public abstract void storeContainer(ContainerId containerId,
-      StartContainerRequest startRequest) throws IOException;
+      int containerVersion, StartContainerRequest startRequest)
+      throws IOException;
 
   /**
    * Record that a container has been queued at the NM
@@ -331,11 +391,12 @@ public abstract class NMStateStoreService extends AbstractService {
   /**
    * Record that a container resource has been changed
    * @param containerId the container ID
+   * @param containerVersion the container version
    * @param capability the container resource capability
    * @throws IOException
    */
   public abstract void storeContainerResourceChanged(ContainerId containerId,
-      Resource capability) throws IOException;
+      int containerVersion, Resource capability) throws IOException;
 
   /**
    * Record that a container has completed
@@ -575,6 +636,57 @@ public abstract class NMStateStoreService extends AbstractService {
   public abstract void removeLogDeleter(ApplicationId appId)
       throws IOException;
 
+  /**
+   * Load the state of AMRMProxy.
+   * @return recovered state of AMRMProxy
+   * @throws IOException if fails
+   */
+  public abstract RecoveredAMRMProxyState loadAMRMProxyState()
+      throws IOException;
+
+  /**
+   * Record the current AMRMProxyTokenSecretManager master key.
+   * @param key the current master key
+   * @throws IOException if fails
+   */
+  public abstract void storeAMRMProxyCurrentMasterKey(MasterKey key)
+      throws IOException;
+
+  /**
+   * Record the next AMRMProxyTokenSecretManager master key.
+   * @param key the next master key
+   * @throws IOException if fails
+   */
+  public abstract void storeAMRMProxyNextMasterKey(MasterKey key)
+      throws IOException;
+
+  /**
+   * Add a context entry for an application attempt in AMRMProxyService.
+   * @param attempt app attempt ID
+   * @param key key string
+   * @param data state data to store
+   * @throws IOException if fails
+   */
+  public abstract void storeAMRMProxyAppContextEntry(
+      ApplicationAttemptId attempt, String key, byte[] data) throws IOException;
+
+  /**
+   * Remove a context entry for an application attempt in AMRMProxyService.
+   * @param attempt attempt ID
+   * @param key key string
+   * @throws IOException if fails
+   */
+  public abstract void removeAMRMProxyAppContextEntry(
+      ApplicationAttemptId attempt, String key) throws IOException;
+
+  /**
+   * Remove the entire context map for an application attempt in
+   * AMRMProxyService.
+   * @param attempt attempt ID
+   * @throws IOException if fails
+   */
+  public abstract void removeAMRMProxyAppContext(ApplicationAttemptId attempt)
+      throws IOException;
 
   protected abstract void initStorage(Configuration conf) throws IOException;
 

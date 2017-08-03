@@ -32,6 +32,7 @@ import org.apache.hadoop.classification.InterfaceStability.Unstable;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.http.HttpServer2;
 import org.apache.hadoop.http.lib.StaticUserWebFilter;
+import org.apache.hadoop.security.HttpCrossOriginFilterInitializer;
 import org.apache.hadoop.service.CompositeService;
 import org.apache.hadoop.util.ExitUtil;
 import org.apache.hadoop.util.ReflectionUtils;
@@ -41,7 +42,6 @@ import org.apache.hadoop.yarn.YarnUncaughtExceptionHandler;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.exceptions.YarnException;
 import org.apache.hadoop.yarn.exceptions.YarnRuntimeException;
-import org.apache.hadoop.yarn.server.timelineservice.storage.HBaseTimelineReaderImpl;
 import org.apache.hadoop.yarn.server.timelineservice.storage.TimelineReader;
 import org.apache.hadoop.yarn.webapp.GenericExceptionHandler;
 import org.apache.hadoop.yarn.webapp.YarnJacksonJaxbJsonProvider;
@@ -72,20 +72,33 @@ public class TimelineReaderServer extends CompositeService {
     }
 
     TimelineReader timelineReaderStore = createTimelineReaderStore(conf);
+    timelineReaderStore.init(conf);
     addService(timelineReaderStore);
     timelineReaderManager = createTimelineReaderManager(timelineReaderStore);
     addService(timelineReaderManager);
     super.serviceInit(conf);
   }
 
-  private TimelineReader createTimelineReaderStore(Configuration conf) {
-    TimelineReader readerStore = ReflectionUtils.newInstance(conf.getClass(
+  private TimelineReader createTimelineReaderStore(final Configuration conf) {
+    String timelineReaderClassName = conf.get(
         YarnConfiguration.TIMELINE_SERVICE_READER_CLASS,
-        HBaseTimelineReaderImpl.class, TimelineReader.class), conf);
-    LOG.info("Using store " + readerStore.getClass().getName());
-    readerStore.init(conf);
-    return readerStore;
+        YarnConfiguration.DEFAULT_TIMELINE_SERVICE_READER_CLASS);
+    LOG.info("Using store: " + timelineReaderClassName);
+    try {
+      Class<?> timelineReaderClazz = Class.forName(timelineReaderClassName);
+      if (TimelineReader.class.isAssignableFrom(timelineReaderClazz)) {
+        return (TimelineReader) ReflectionUtils.newInstance(
+            timelineReaderClazz, conf);
+      } else {
+        throw new YarnRuntimeException("Class: " + timelineReaderClassName
+            + " not instance of " + TimelineReader.class.getCanonicalName());
+      }
+    } catch (ClassNotFoundException e) {
+      throw new YarnRuntimeException("Could not instantiate TimelineReader: "
+          + timelineReaderClassName, e);
+    }
   }
+
 
   private TimelineReaderManager createTimelineReaderManager(
       TimelineReader timelineReaderStore) {
@@ -96,6 +109,16 @@ public class TimelineReaderServer extends CompositeService {
   protected void serviceStart() throws Exception {
     super.serviceStart();
     startTimelineReaderWebApp();
+  }
+
+  private void join() {
+    // keep the main thread that started the server up until it receives a stop
+    // signal
+    if (readerWebServer != null) {
+      try {
+        readerWebServer.join();
+      } catch (InterruptedException ignore) {}
+    }
   }
 
   @Override
@@ -112,6 +135,14 @@ public class TimelineReaderServer extends CompositeService {
         YarnConfiguration.TIMELINE_SERVICE_BIND_HOST,
         WebAppUtils.getTimelineReaderWebAppURL(conf));
     LOG.info("Instantiating TimelineReaderWebApp at " + bindAddress);
+    boolean enableCorsFilter = conf.getBoolean(
+        YarnConfiguration.TIMELINE_SERVICE_HTTP_CROSS_ORIGIN_ENABLED,
+        YarnConfiguration.TIMELINE_SERVICE_HTTP_CROSS_ORIGIN_ENABLED_DEFAULT);
+    // setup CORS
+    if (enableCorsFilter) {
+      conf.setBoolean(HttpCrossOriginFilterInitializer.PREFIX
+          + HttpCrossOriginFilterInitializer.ENABLED_SUFFIX, true);
+    }
     try {
       HttpServer2.Builder builder = new HttpServer2.Builder()
             .setName("timeline")
@@ -119,14 +150,7 @@ public class TimelineReaderServer extends CompositeService {
             .addEndpoint(URI.create("http://" + bindAddress));
       readerWebServer = builder.build();
 
-      Map<String, String> options = new HashMap<>();
-      String username = conf.get(HADOOP_HTTP_STATIC_USER,
-          DEFAULT_HADOOP_HTTP_STATIC_USER);
-      options.put(HADOOP_HTTP_STATIC_USER, username);
-      HttpServer2.defineFilter(readerWebServer.getWebAppContext(),
-          "static_user_filter_timeline",
-          StaticUserWebFilter.StaticUserFilter.class.getName(),
-          options, new String[] {"/*"});
+      setupOptions(conf);
 
       readerWebServer.addJerseyResourcePackage(
           TimelineReaderWebServices.class.getPackage().getName() + ";"
@@ -141,6 +165,22 @@ public class TimelineReaderServer extends CompositeService {
       LOG.error(msg, e);
       throw new YarnRuntimeException(msg, e);
     }
+  }
+
+  /**
+   * Sets up some options and filters.
+   *
+   * @param conf Configuration
+   */
+  protected void setupOptions(Configuration conf) {
+    Map<String, String> options = new HashMap<>();
+    String username = conf.get(HADOOP_HTTP_STATIC_USER,
+        DEFAULT_HADOOP_HTTP_STATIC_USER);
+    options.put(HADOOP_HTTP_STATIC_USER, username);
+    HttpServer2.defineFilter(readerWebServer.getWebAppContext(),
+        "static_user_filter_timeline",
+        StaticUserWebFilter.StaticUserFilter.class.getName(),
+        options, new String[] {"/*"});
   }
 
   @VisibleForTesting
@@ -173,6 +213,7 @@ public class TimelineReaderServer extends CompositeService {
     Configuration conf = new YarnConfiguration();
     conf.setBoolean(YarnConfiguration.TIMELINE_SERVICE_ENABLED, true);
     conf.setFloat(YarnConfiguration.TIMELINE_SERVICE_VERSION, 2.0f);
-    startTimelineReaderServer(args, conf);
+    TimelineReaderServer server = startTimelineReaderServer(args, conf);
+    server.join();
   }
 }

@@ -69,6 +69,8 @@ import org.apache.hadoop.yarn.server.nodemanager.DeletionService;
 import org.apache.hadoop.yarn.server.nodemanager.LocalDirsHandlerService;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.application.ApplicationEvent;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.application.ApplicationEventType;
+import org.apache.hadoop.yarn.server.nodemanager.containermanager.deletion.task.DeletionTask;
+import org.apache.hadoop.yarn.server.nodemanager.containermanager.deletion.task.FileDeletionTask;
 import org.apache.hadoop.yarn.util.ConverterUtils;
 import org.apache.hadoop.yarn.util.Records;
 import org.apache.hadoop.yarn.util.Times;
@@ -258,19 +260,7 @@ public class AppLogAggregatorImpl implements AppLogAggregator {
       return;
     }
 
-    if (UserGroupInformation.isSecurityEnabled()) {
-      Credentials systemCredentials =
-          context.getSystemCredentialsForApps().get(appId);
-      if (systemCredentials != null) {
-        if (LOG.isDebugEnabled()) {
-          LOG.debug("Adding new framework-token for " + appId
-              + " for log-aggregation: " + systemCredentials.getAllTokens()
-              + "; userUgi=" + userUgi);
-        }
-        // this will replace old token
-        userUgi.addCredentials(systemCredentials);
-      }
-    }
+    addCredentials();
 
     // Create a set of Containers whose logs will be uploaded in this cycle.
     // It includes:
@@ -295,18 +285,18 @@ public class AppLogAggregatorImpl implements AppLogAggregator {
       }
     }
 
-    LogWriter writer = null;
+    if (pendingContainerInThisCycle.isEmpty()) {
+      sendLogAggregationReport(true, "", appFinished);
+      return;
+    }
+
+    logAggregationTimes++;
     String diagnosticMessage = "";
     boolean logAggregationSucceedInThisCycle = true;
-    try {
-      if (pendingContainerInThisCycle.isEmpty()) {
-        return;
-      }
-
-      logAggregationTimes++;
-
+    try (LogWriter writer = createLogWriter()) {
       try {
-        writer = createLogWriter();
+        writer.initialize(this.conf, this.remoteNodeTmpLogFileForApp,
+            this.userUgi);
         // Write ACLs once when the writer is created.
         writer.writeApplicationACLs(appAcls);
         writer.writeApplicationOwner(this.userUgi.getShortUserName());
@@ -332,9 +322,12 @@ public class AppLogAggregatorImpl implements AppLogAggregator {
             finishedContainers.contains(container));
         if (uploadedFilePathsInThisCycle.size() > 0) {
           uploadedLogsInThisCycle = true;
-          this.delService.delete(this.userUgi.getShortUserName(), null,
-              uploadedFilePathsInThisCycle
-                  .toArray(new Path[uploadedFilePathsInThisCycle.size()]));
+          List<Path> uploadedFilePathsInThisCycleList = new ArrayList<>();
+          uploadedFilePathsInThisCycleList.addAll(uploadedFilePathsInThisCycle);
+          DeletionTask deletionTask = new FileDeletionTask(delService,
+              this.userUgi.getShortUserName(), null,
+              uploadedFilePathsInThisCycleList);
+          delService.delete(deletionTask);
         }
 
         // This container is finished, and all its logs have been uploaded,
@@ -351,17 +344,8 @@ public class AppLogAggregatorImpl implements AppLogAggregator {
         cleanupOldLogTimes++;
       }
 
-      if (writer != null) {
-        writer.close();
-        writer = null;
-      }
-
       long currentTime = System.currentTimeMillis();
-      final Path renamedPath = this.rollingMonitorInterval <= 0
-              ? remoteNodeLogFileForApp : new Path(
-                remoteNodeLogFileForApp.getParent(),
-                remoteNodeLogFileForApp.getName() + "_"
-                    + currentTime);
+      final Path renamedPath = getRenamedPath(currentTime);
 
       final boolean rename = uploadedLogsInThisCycle;
       try {
@@ -396,34 +380,59 @@ public class AppLogAggregatorImpl implements AppLogAggregator {
         logAggregationSucceedInThisCycle = false;
       }
     } finally {
-      LogAggregationStatus logAggregationStatus =
-          logAggregationSucceedInThisCycle
-              ? LogAggregationStatus.RUNNING
-              : LogAggregationStatus.RUNNING_WITH_FAILURE;
-      sendLogAggregationReport(logAggregationStatus, diagnosticMessage);
-      if (appFinished) {
-        // If the app is finished, one extra final report with log aggregation
-        // status SUCCEEDED/FAILED will be sent to RM to inform the RM
-        // that the log aggregation in this NM is completed.
-        LogAggregationStatus finalLogAggregationStatus =
-            renameTemporaryLogFileFailed || !logAggregationSucceedInThisCycle
-                ? LogAggregationStatus.FAILED
-                : LogAggregationStatus.SUCCEEDED;
-        sendLogAggregationReport(finalLogAggregationStatus, "");
-      }
+      sendLogAggregationReport(logAggregationSucceedInThisCycle,
+          diagnosticMessage, appFinished);
+    }
+  }
 
-      if (writer != null) {
-        writer.close();
+  private Path getRenamedPath(long currentTime) {
+    return this.rollingMonitorInterval <= 0 ? remoteNodeLogFileForApp
+        : new Path(remoteNodeLogFileForApp.getParent(),
+        remoteNodeLogFileForApp.getName() + "_" + currentTime);
+  }
+
+  private void addCredentials() {
+    if (UserGroupInformation.isSecurityEnabled()) {
+      Credentials systemCredentials =
+          context.getSystemCredentialsForApps().get(appId);
+      if (systemCredentials != null) {
+        if (LOG.isDebugEnabled()) {
+          LOG.debug("Adding new framework-token for " + appId
+              + " for log-aggregation: " + systemCredentials.getAllTokens()
+              + "; userUgi=" + userUgi);
+        }
+        // this will replace old token
+        userUgi.addCredentials(systemCredentials);
       }
     }
   }
 
-  protected LogWriter createLogWriter() throws IOException {
-    return new LogWriter(this.conf, this.remoteNodeTmpLogFileForApp,
-        this.userUgi);
+  @VisibleForTesting
+  protected LogWriter createLogWriter() {
+    return new LogWriter();
   }
 
   private void sendLogAggregationReport(
+      boolean logAggregationSucceedInThisCycle, String diagnosticMessage,
+      boolean appFinished) {
+    LogAggregationStatus logAggregationStatus =
+        logAggregationSucceedInThisCycle
+            ? LogAggregationStatus.RUNNING
+            : LogAggregationStatus.RUNNING_WITH_FAILURE;
+    sendLogAggregationReportInternal(logAggregationStatus, diagnosticMessage);
+    if (appFinished) {
+      // If the app is finished, one extra final report with log aggregation
+      // status SUCCEEDED/FAILED will be sent to RM to inform the RM
+      // that the log aggregation in this NM is completed.
+      LogAggregationStatus finalLogAggregationStatus =
+          renameTemporaryLogFileFailed || !logAggregationSucceedInThisCycle
+              ? LogAggregationStatus.FAILED
+              : LogAggregationStatus.SUCCEEDED;
+      sendLogAggregationReportInternal(finalLogAggregationStatus, "");
+    }
+  }
+
+  private void sendLogAggregationReportInternal(
       LogAggregationStatus logAggregationStatus, String diagnosticMessage) {
     LogAggregationReport report =
         Records.newRecord(LogAggregationReport.class);
@@ -494,12 +503,12 @@ public class AppLogAggregatorImpl implements AppLogAggregator {
       doAppLogAggregation();
     } catch (Exception e) {
       // do post clean up of log directories on any exception
-      LOG.error("Error occured while aggregating the log for the application "
+      LOG.error("Error occurred while aggregating the log for the application "
           + appId, e);
       doAppLogAggregationPostCleanUp();
     } finally {
-      if (!this.appAggregationFinished.get()) {
-        LOG.warn("Aggregation did not complete for application " + appId);
+      if (!this.appAggregationFinished.get() && !this.aborted.get()) {
+        LOG.warn("Log aggregation did not complete for application " + appId);
         this.dispatcher.getEventHandler().handle(
             new ApplicationEvent(this.appId,
                 ApplicationEventType.APPLICATION_LOG_HANDLING_FAILED));
@@ -563,8 +572,11 @@ public class AppLogAggregatorImpl implements AppLogAggregator {
     }
 
     if (localAppLogDirs.size() > 0) {
-      this.delService.delete(this.userUgi.getShortUserName(), null,
-        localAppLogDirs.toArray(new Path[localAppLogDirs.size()]));
+      List<Path> localAppLogDirsList = new ArrayList<>();
+      localAppLogDirsList.addAll(localAppLogDirs);
+      DeletionTask deletionTask = new FileDeletionTask(delService,
+          this.userUgi.getShortUserName(), null, localAppLogDirsList);
+      this.delService.delete(deletionTask);
     }
   }
 
@@ -573,8 +585,6 @@ public class AppLogAggregatorImpl implements AppLogAggregator {
       (remoteNodeLogFileForApp.getName() + LogAggregationUtils.TMP_FILE_SUFFIX));
   }
 
-  // TODO: The condition: containerId.getId() == 1 to determine an AM container
-  // is not always true.
   private boolean shouldUploadLogs(ContainerLogContext logContext) {
     return logAggPolicy.shouldDoLogAggregation(logContext);
   }

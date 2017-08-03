@@ -82,7 +82,7 @@ public class SelfRenewingLease {
         // Throw again if we don't want to keep waiting.
         // We expect it to be that the lease is already present,
         // or in some cases that the blob does not exist.
-        if (!e.getErrorCode().equals("LeaseAlreadyPresent")) {
+        if (!"LeaseAlreadyPresent".equals(e.getErrorCode())) {
           LOG.info(
             "Caught exception when trying to get lease on blob "
             + blobWrapper.getUri().toString() + ". " + e.getMessage());
@@ -111,7 +111,7 @@ public class SelfRenewingLease {
 
   /**
    * Free the lease and stop the keep-alive thread.
-   * @throws StorageException
+   * @throws StorageException Thrown when fail to free the lease.
    */
   public void free() throws StorageException {
     AccessCondition accessCondition = AccessCondition.generateEmptyCondition();
@@ -119,7 +119,7 @@ public class SelfRenewingLease {
     try {
       blobWrapper.getBlob().releaseLease(accessCondition);
     } catch (StorageException e) {
-      if (e.getErrorCode().equals("BlobNotFound")) {
+      if ("BlobNotFound".equals(e.getErrorCode())) {
 
         // Don't do anything -- it's okay to free a lease
         // on a deleted file. The delete freed the lease

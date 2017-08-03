@@ -40,6 +40,7 @@ import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.ApplicationSubmissionContext;
 import org.apache.hadoop.yarn.api.records.Container;
 import org.apache.hadoop.yarn.api.records.ContainerId;
+import org.apache.hadoop.yarn.api.records.ContainerLaunchContext;
 import org.apache.hadoop.yarn.api.records.ContainerState;
 import org.apache.hadoop.yarn.api.records.FinalApplicationStatus;
 import org.apache.hadoop.yarn.api.records.NodeId;
@@ -55,6 +56,7 @@ import org.apache.hadoop.yarn.server.metrics.AppAttemptMetricsConstants;
 import org.apache.hadoop.yarn.server.metrics.ApplicationMetricsConstants;
 import org.apache.hadoop.yarn.server.metrics.ContainerMetricsConstants;
 import org.apache.hadoop.yarn.server.resourcemanager.RMContext;
+import org.apache.hadoop.yarn.server.resourcemanager.ResourceManager;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMApp;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppImpl;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppMetrics;
@@ -97,10 +99,12 @@ public class TestSystemMetricsPublisherForV2 {
           new Path(testRootDir.getAbsolutePath()), true);
     }
 
+    ResourceManager rm = mock(ResourceManager.class);
     RMContext rmContext = mock(RMContext.class);
     rmAppsMapInContext = new ConcurrentHashMap<ApplicationId, RMApp>();
     when(rmContext.getRMApps()).thenReturn(rmAppsMapInContext);
-    rmTimelineCollectorManager = new RMTimelineCollectorManager(rmContext);
+    when(rm.getRMContext()).thenReturn(rmContext);
+    rmTimelineCollectorManager = new RMTimelineCollectorManager(rm);
     when(rmContext.getRMTimelineCollectorManager()).thenReturn(
         rmTimelineCollectorManager);
 
@@ -112,7 +116,8 @@ public class TestSystemMetricsPublisherForV2 {
 
     dispatcher.init(conf);
     dispatcher.start();
-    metricsPublisher = new TimelineServiceV2Publisher(rmContext) {
+    metricsPublisher =
+        new TimelineServiceV2Publisher(rmTimelineCollectorManager) {
       @Override
       protected Dispatcher getDispatcher() {
         return dispatcher;
@@ -161,7 +166,7 @@ public class TestSystemMetricsPublisherForV2 {
   public void testSystemMetricPublisherInitialization() {
     @SuppressWarnings("resource")
     TimelineServiceV2Publisher publisher =
-        new TimelineServiceV2Publisher(mock(RMContext.class));
+        new TimelineServiceV2Publisher(mock(RMTimelineCollectorManager.class));
     try {
       Configuration conf = getTimelineV2Conf();
       conf.setBoolean(YarnConfiguration.RM_PUBLISH_CONTAINER_EVENTS_ENABLED,
@@ -173,7 +178,8 @@ public class TestSystemMetricsPublisherForV2 {
 
       publisher.stop();
 
-      publisher = new TimelineServiceV2Publisher(mock(RMContext.class));
+      publisher = new TimelineServiceV2Publisher(
+          mock(RMTimelineCollectorManager.class));
       conf = getTimelineV2Conf();
       publisher.init(conf);
       assertTrue("Expected to have registered event handlers and set ready to "
@@ -210,7 +216,7 @@ public class TestSystemMetricsPublisherForV2 {
             + FileSystemTimelineWriterImpl.TIMELINE_SERVICE_STORAGE_EXTENSION;
     File appFile = new File(outputDirApp, timelineServiceFileName);
     Assert.assertTrue(appFile.exists());
-    verifyEntity(appFile, 3, ApplicationMetricsConstants.CREATED_EVENT_TYPE);
+    verifyEntity(appFile, 3, ApplicationMetricsConstants.CREATED_EVENT_TYPE, 8);
   }
 
   @Test(timeout = 10000)
@@ -244,7 +250,8 @@ public class TestSystemMetricsPublisherForV2 {
             + FileSystemTimelineWriterImpl.TIMELINE_SERVICE_STORAGE_EXTENSION;
     File appFile = new File(outputDirApp, timelineServiceFileName);
     Assert.assertTrue(appFile.exists());
-    verifyEntity(appFile, 2, AppAttemptMetricsConstants.REGISTERED_EVENT_TYPE);
+    verifyEntity(appFile, 2, AppAttemptMetricsConstants.REGISTERED_EVENT_TYPE,
+        0);
   }
 
   @Test(timeout = 10000)
@@ -276,7 +283,7 @@ public class TestSystemMetricsPublisherForV2 {
     File appFile = new File(outputDirApp, timelineServiceFileName);
     Assert.assertTrue(appFile.exists());
     verifyEntity(appFile, 2,
-        ContainerMetricsConstants.CREATED_IN_RM_EVENT_TYPE);
+        ContainerMetricsConstants.CREATED_IN_RM_EVENT_TYPE, 0);
   }
 
   private RMApp createAppAndRegister(ApplicationId appId) {
@@ -290,16 +297,18 @@ public class TestSystemMetricsPublisherForV2 {
   }
 
   private static void verifyEntity(File entityFile, long expectedEvents,
-      String eventForCreatedTime) throws IOException {
+      String eventForCreatedTime, long expectedMetrics) throws IOException {
     BufferedReader reader = null;
     String strLine;
     long count = 0;
+    long metricsCount = 0;
     try {
       reader = new BufferedReader(new FileReader(entityFile));
       while ((strLine = reader.readLine()) != null) {
         if (strLine.trim().length() > 0) {
           TimelineEntity entity = FileSystemTimelineReaderImpl.
               getTimelineRecordFromJSON(strLine.trim(), TimelineEntity.class);
+          metricsCount = entity.getMetrics().size();
           for (TimelineEvent event : entity.getEvents()) {
             if (event.getId().equals(eventForCreatedTime)) {
               assertTrue(entity.getCreatedTime() > 0);
@@ -313,7 +322,9 @@ public class TestSystemMetricsPublisherForV2 {
       reader.close();
     }
     assertEquals("Expected " + expectedEvents + " events to be published",
-        count, expectedEvents);
+        expectedEvents, count);
+    assertEquals("Expected " + expectedMetrics + " metrics is incorrect",
+        expectedMetrics, metricsCount);
   }
 
   private String getTimelineEntityDir(RMApp app) {
@@ -348,12 +359,22 @@ public class TestSystemMetricsPublisherForV2 {
     when(app.getFinalApplicationStatus()).thenReturn(
         FinalApplicationStatus.UNDEFINED);
     when(app.getRMAppMetrics()).thenReturn(
-        new RMAppMetrics(null, 0, 0, Integer.MAX_VALUE, Long.MAX_VALUE));
+        new RMAppMetrics(Resource.newInstance(0, 0), 0, 0, Integer.MAX_VALUE,
+            Long.MAX_VALUE, 0, 0));
     when(app.getApplicationTags()).thenReturn(Collections.<String> emptySet());
     ApplicationSubmissionContext appSubmissionContext =
         mock(ApplicationSubmissionContext.class);
     when(appSubmissionContext.getPriority())
         .thenReturn(Priority.newInstance(0));
+
+    when(app.getApplicationPriority()).thenReturn(Priority.newInstance(10));
+    ContainerLaunchContext containerLaunchContext =
+        mock(ContainerLaunchContext.class);
+    when(containerLaunchContext.getCommands())
+        .thenReturn(Collections.singletonList("java -Xmx1024m"));
+    when(appSubmissionContext.getAMContainerSpec())
+        .thenReturn(containerLaunchContext);
+
     when(app.getApplicationSubmissionContext())
         .thenReturn(appSubmissionContext);
     return app;

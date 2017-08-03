@@ -31,6 +31,7 @@ import java.util.TreeMap;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.yarn.api.protocolrecords.ReservationSubmissionRequest;
+import org.apache.hadoop.yarn.api.records.Priority;
 import org.apache.hadoop.yarn.api.records.ReservationDefinition;
 import org.apache.hadoop.yarn.api.records.ReservationId;
 import org.apache.hadoop.yarn.api.records.ReservationRequest;
@@ -55,6 +56,7 @@ import org.apache.hadoop.yarn.server.resourcemanager.scheduler.fair.FairSchedule
 import org.apache.hadoop.yarn.server.resourcemanager.security.ClientToAMTokenSecretManagerInRM;
 import org.apache.hadoop.yarn.server.resourcemanager.security.NMTokenSecretManagerInRM;
 import org.apache.hadoop.yarn.server.resourcemanager.security.RMContainerTokenSecretManager;
+import org.apache.hadoop.yarn.util.resource.DefaultResourceCalculator;
 import org.junit.Assert;
 import org.mockito.Mockito;
 import org.mockito.invocation.InvocationOnMock;
@@ -199,6 +201,13 @@ public class ReservationSystemTestUtil {
   public static ReservationSubmissionRequest createSimpleReservationRequest(
       ReservationId reservationId, int numContainers, long arrival,
       long deadline, long duration) {
+    return createSimpleReservationRequest(reservationId, numContainers,
+        arrival, deadline, duration, Priority.UNDEFINED);
+  }
+
+  public static ReservationSubmissionRequest createSimpleReservationRequest(
+      ReservationId reservationId, int numContainers, long arrival,
+      long deadline, long duration, Priority priority) {
     // create a request with a single atomic ask
     ReservationRequest r =
         ReservationRequest.newInstance(Resource.newInstance(1024, 1),
@@ -208,7 +217,7 @@ public class ReservationSystemTestUtil {
             ReservationRequestInterpreter.R_ALL);
     ReservationDefinition rDef =
         ReservationDefinition.newInstance(arrival, deadline, reqs,
-            "testClientRMService#reservation");
+            "testClientRMService#reservation", "0", priority);
     ReservationSubmissionRequest request =
         ReservationSubmissionRequest.newInstance(rDef,
             reservationQ, reservationId);
@@ -404,6 +413,19 @@ public class ReservationSystemTestUtil {
               .newInstance(Resource.newInstance(1024, 1), alloc[i])));
     }
     return req;
+  }
+
+  public static RLESparseResourceAllocation
+      generateRLESparseResourceAllocation(int[] alloc, long[] timeSteps) {
+    TreeMap<Long, Resource> allocationsMap = new TreeMap<>();
+    for (int i = 0; i < alloc.length; i++) {
+      allocationsMap.put(timeSteps[i],
+          Resource.newInstance(alloc[i], alloc[i]));
+    }
+    RLESparseResourceAllocation rleVector =
+        new RLESparseResourceAllocation(allocationsMap,
+            new DefaultResourceCalculator());
+    return rleVector;
   }
 
   public static Resource calculateClusterResource(int numContainers) {

@@ -53,17 +53,17 @@ import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.event.RMAppAt
 import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNodeCleanContainerEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.rmnode
     .RMNodeDecreaseContainerEvent;
+import org.apache.hadoop.yarn.server.scheduler.SchedulerRequestKey;
 import org.apache.hadoop.yarn.state.InvalidStateTransitionException;
 import org.apache.hadoop.yarn.state.MultipleArcTransition;
 import org.apache.hadoop.yarn.state.SingleArcTransition;
 import org.apache.hadoop.yarn.state.StateMachine;
 import org.apache.hadoop.yarn.state.StateMachineFactory;
-import org.apache.hadoop.yarn.util.ConverterUtils;
 import org.apache.hadoop.yarn.util.resource.Resources;
 import org.apache.hadoop.yarn.webapp.util.WebAppUtils;
 
 @SuppressWarnings({"unchecked", "rawtypes"})
-public class RMContainerImpl implements RMContainer, Comparable<RMContainer> {
+public class RMContainerImpl implements RMContainer {
 
   private static final Log LOG = LogFactory.getLog(RMContainerImpl.class);
 
@@ -80,8 +80,8 @@ public class RMContainerImpl implements RMContainer, Comparable<RMContainer> {
         RMContainerEventType.KILL)
     .addTransition(RMContainerState.NEW, RMContainerState.RESERVED,
         RMContainerEventType.RESERVED, new ContainerReservedTransition())
-    .addTransition(RMContainerState.NEW, RMContainerState.RUNNING,
-        RMContainerEventType.LAUNCHED)
+    .addTransition(RMContainerState.NEW, RMContainerState.ACQUIRED,
+        RMContainerEventType.ACQUIRED, new AcquiredTransition())
     .addTransition(RMContainerState.NEW,
         EnumSet.of(RMContainerState.RUNNING, RMContainerState.COMPLETED),
         RMContainerEventType.RECOVER, new ContainerRecoveredTransition())
@@ -108,6 +108,8 @@ public class RMContainerImpl implements RMContainer, Comparable<RMContainer> {
     // Transitions from ACQUIRED state
     .addTransition(RMContainerState.ACQUIRED, RMContainerState.RUNNING,
         RMContainerEventType.LAUNCHED)
+    .addTransition(RMContainerState.ACQUIRED, RMContainerState.ACQUIRED,
+        RMContainerEventType.ACQUIRED)
     .addTransition(RMContainerState.ACQUIRED, RMContainerState.COMPLETED,
         RMContainerEventType.FINISHED, new FinishedTransition())
     .addTransition(RMContainerState.ACQUIRED, RMContainerState.RELEASED,
@@ -125,9 +127,9 @@ public class RMContainerImpl implements RMContainer, Comparable<RMContainer> {
     .addTransition(RMContainerState.RUNNING, RMContainerState.RELEASED,
         RMContainerEventType.RELEASED, new KillTransition())
     .addTransition(RMContainerState.RUNNING, RMContainerState.RUNNING,
-        RMContainerEventType.RESERVED, new ContainerReservedTransition())
+        RMContainerEventType.ACQUIRED)
     .addTransition(RMContainerState.RUNNING, RMContainerState.RUNNING,
-        RMContainerEventType.CHANGE_RESOURCE, new ChangeResourceTransition())
+        RMContainerEventType.RESERVED, new ContainerReservedTransition())
     .addTransition(RMContainerState.RUNNING, RMContainerState.RUNNING,
         RMContainerEventType.ACQUIRE_UPDATED_CONTAINER, 
         new ContainerAcquiredWhileRunningTransition())
@@ -161,71 +163,70 @@ public class RMContainerImpl implements RMContainer, Comparable<RMContainer> {
                                                  RMContainerEvent> stateMachine;
   private final ReadLock readLock;
   private final WriteLock writeLock;
-  private final ContainerId containerId;
   private final ApplicationAttemptId appAttemptId;
   private final NodeId nodeId;
-  private final Container container;
   private final RMContext rmContext;
   private final EventHandler eventHandler;
   private final ContainerAllocationExpirer containerAllocationExpirer;
   private final String user;
   private final String nodeLabelExpression;
 
+  private volatile Container container;
   private Resource reservedResource;
   private NodeId reservedNode;
-  private Priority reservedPriority;
+  private SchedulerRequestKey reservedSchedulerKey;
   private long creationTime;
   private long finishTime;
   private ContainerStatus finishedStatus;
   private boolean isAMContainer;
   private List<ResourceRequest> resourceRequests;
 
-  private volatile boolean hasIncreaseReservation = false;
   // Only used for container resource increase and decrease. This is the
   // resource to rollback to should container resource increase token expires.
   private Resource lastConfirmedResource;
   private volatile String queueName;
 
   private boolean isExternallyAllocated;
+  private SchedulerRequestKey allocatedSchedulerKey;
 
-  public RMContainerImpl(Container container,
+  public RMContainerImpl(Container container, SchedulerRequestKey schedulerKey,
       ApplicationAttemptId appAttemptId, NodeId nodeId, String user,
       RMContext rmContext) {
-    this(container, appAttemptId, nodeId, user, rmContext, System
+    this(container, schedulerKey, appAttemptId, nodeId, user, rmContext, System
         .currentTimeMillis(), "");
   }
 
-  public RMContainerImpl(Container container,
+  public RMContainerImpl(Container container, SchedulerRequestKey schedulerKey,
       ApplicationAttemptId appAttemptId, NodeId nodeId, String user,
       RMContext rmContext, boolean isExternallyAllocated) {
-    this(container, appAttemptId, nodeId, user, rmContext, System
+    this(container, schedulerKey, appAttemptId, nodeId, user, rmContext, System
         .currentTimeMillis(), "", isExternallyAllocated);
   }
 
   private boolean saveNonAMContainerMetaInfo;
 
-  public RMContainerImpl(Container container,
+  public RMContainerImpl(Container container, SchedulerRequestKey schedulerKey,
       ApplicationAttemptId appAttemptId, NodeId nodeId, String user,
       RMContext rmContext, String nodeLabelExpression) {
-    this(container, appAttemptId, nodeId, user, rmContext, System
+    this(container, schedulerKey, appAttemptId, nodeId, user, rmContext, System
       .currentTimeMillis(), nodeLabelExpression);
   }
 
-  public RMContainerImpl(Container container,
+  public RMContainerImpl(Container container, SchedulerRequestKey schedulerKey,
       ApplicationAttemptId appAttemptId, NodeId nodeId, String user,
       RMContext rmContext, long creationTime, String nodeLabelExpression) {
-    this(container, appAttemptId, nodeId, user, rmContext, creationTime,
-        nodeLabelExpression, false);
+    this(container, schedulerKey, appAttemptId, nodeId, user, rmContext,
+        creationTime, nodeLabelExpression, false);
   }
 
-  public RMContainerImpl(Container container,
+  public RMContainerImpl(Container container, SchedulerRequestKey schedulerKey,
       ApplicationAttemptId appAttemptId, NodeId nodeId, String user,
       RMContext rmContext, long creationTime, String nodeLabelExpression,
       boolean isExternallyAllocated) {
     this.stateMachine = stateMachineFactory.make(this);
-    this.containerId = container.getId();
     this.nodeId = nodeId;
     this.container = container;
+    this.allocatedSchedulerKey = schedulerKey;
     this.appAttemptId = appAttemptId;
     this.user = user;
     this.creationTime = creationTime;
@@ -247,13 +248,15 @@ public class RMContainerImpl implements RMContainer, Comparable<RMContainer> {
        YarnConfiguration
                  .DEFAULT_APPLICATION_HISTORY_SAVE_NON_AM_CONTAINER_META_INFO);
 
-    rmContext.getRMApplicationHistoryWriter().containerStarted(this);
+    if (container.getId() != null) {
+      rmContext.getRMApplicationHistoryWriter().containerStarted(this);
+    }
 
     // If saveNonAMContainerMetaInfo is true, store system metrics for all
     // containers. If false, and if this container is marked as the AM, metrics
     // will still be published for this container, but that calculation happens
     // later.
-    if (saveNonAMContainerMetaInfo) {
+    if (saveNonAMContainerMetaInfo && null != container.getId()) {
       rmContext.getSystemMetricsPublisher().containerCreated(
           this, this.creationTime);
     }
@@ -261,7 +264,7 @@ public class RMContainerImpl implements RMContainer, Comparable<RMContainer> {
 
   @Override
   public ContainerId getContainerId() {
-    return this.containerId;
+    return this.container.getId();
   }
 
   @Override
@@ -272,6 +275,10 @@ public class RMContainerImpl implements RMContainer, Comparable<RMContainer> {
   @Override
   public Container getContainer() {
     return this.container;
+  }
+
+  public void setContainer(Container container) {
+    this.container = container;
   }
 
   @Override
@@ -296,8 +303,8 @@ public class RMContainerImpl implements RMContainer, Comparable<RMContainer> {
   }
 
   @Override
-  public Priority getReservedPriority() {
-    return reservedPriority;
+  public SchedulerRequestKey getReservedSchedulerKey() {
+    return reservedSchedulerKey;
   }
 
   @Override
@@ -326,6 +333,11 @@ public class RMContainerImpl implements RMContainer, Comparable<RMContainer> {
   }
 
   @Override
+  public SchedulerRequestKey getAllocatedSchedulerKey() {
+    return allocatedSchedulerKey;
+  }
+
+  @Override
   public Priority getAllocatedPriority() {
     return container.getPriority();
   }
@@ -349,8 +361,8 @@ public class RMContainerImpl implements RMContainer, Comparable<RMContainer> {
   public String getDiagnosticsInfo() {
     try {
       readLock.lock();
-      if (getFinishedStatus() != null) {
-        return getFinishedStatus().getDiagnostics();
+      if (finishedStatus != null) {
+        return finishedStatus.getDiagnostics();
       } else {
         return null;
       }
@@ -367,7 +379,7 @@ public class RMContainerImpl implements RMContainer, Comparable<RMContainer> {
       logURL.append(WebAppUtils.getHttpSchemePrefix(rmContext
           .getYarnConfiguration()));
       logURL.append(WebAppUtils.getRunningLogURL(
-          container.getNodeHttpAddress(), containerId.toString(),
+          container.getNodeHttpAddress(), getContainerId().toString(),
           user));
       return logURL.toString();
     } finally {
@@ -379,8 +391,8 @@ public class RMContainerImpl implements RMContainer, Comparable<RMContainer> {
   public int getContainerExitStatus() {
     try {
       readLock.lock();
-      if (getFinishedStatus() != null) {
-        return getFinishedStatus().getExitStatus();
+      if (finishedStatus != null) {
+        return finishedStatus.getExitStatus();
       } else {
         return 0;
       }
@@ -393,8 +405,8 @@ public class RMContainerImpl implements RMContainer, Comparable<RMContainer> {
   public ContainerState getContainerState() {
     try {
       readLock.lock();
-      if (getFinishedStatus() != null) {
-        return getFinishedStatus().getState();
+      if (finishedStatus != null) {
+        return finishedStatus.getState();
       } else {
         return ContainerState.RUNNING;
       }
@@ -424,7 +436,7 @@ public class RMContainerImpl implements RMContainer, Comparable<RMContainer> {
 
   @Override
   public String toString() {
-    return containerId.toString();
+    return getContainerId().toString();
   }
   
   @Override
@@ -469,7 +481,7 @@ public class RMContainerImpl implements RMContainer, Comparable<RMContainer> {
       } catch (InvalidStateTransitionException e) {
         LOG.error("Can't handle this event at current state", e);
         LOG.error("Invalid event " + event.getType() + 
-            " on container " + this.containerId);
+            " on container " + this.getContainerId());
       }
       if (oldState != getState()) {
         LOG.info(event.getContainerId() + " Container Transitioned from "
@@ -482,10 +494,15 @@ public class RMContainerImpl implements RMContainer, Comparable<RMContainer> {
     }
   }
   
-  public ContainerStatus getFinishedStatus() {
-    return finishedStatus;
+  public boolean completed() {
+    return finishedStatus != null;
   }
-  
+
+  @Override
+  public NodeId getNodeId() {
+    return nodeId;
+  }
+
   private static class BaseTransition implements
       SingleArcTransition<RMContainerImpl, RMContainerEvent> {
 
@@ -510,7 +527,7 @@ public class RMContainerImpl implements RMContainer, Comparable<RMContainer> {
               report.getContainerExitStatus());
 
         new FinishedTransition().transition(container,
-          new RMContainerFinishedEvent(container.containerId, status,
+          new RMContainerFinishedEvent(container.getContainerId(), status,
             RMContainerEventType.FINISHED));
         return RMContainerState.COMPLETED;
       } else if (report.getContainerState().equals(ContainerState.RUNNING)) {
@@ -535,12 +552,11 @@ public class RMContainerImpl implements RMContainer, Comparable<RMContainer> {
       RMContainerReservedEvent e = (RMContainerReservedEvent)event;
       container.reservedResource = e.getReservedResource();
       container.reservedNode = e.getReservedNode();
-      container.reservedPriority = e.getReservedPriority();
-      
-      if (!EnumSet.of(RMContainerState.NEW, RMContainerState.RESERVED)
-          .contains(container.getState())) {
-        // When container's state != NEW/RESERVED, it is an increase reservation
-        container.hasIncreaseReservation = true;
+      container.reservedSchedulerKey = e.getReservedSchedulerKey();
+
+      Container c = container.getContainer();
+      if (c != null) {
+        c.setNodeId(container.reservedNode);
       }
     }
   }
@@ -647,40 +663,13 @@ public class RMContainerImpl implements RMContainer, Comparable<RMContainer> {
       } else {
         // Something wrong happened, kill the container
         LOG.warn("Something wrong happened, container size reported by NM"
-            + " is not expected, ContainerID=" + container.containerId
+            + " is not expected, ContainerID=" + container.getContainerId()
             + " rm-size-resource:" + rmContainerResource + " nm-size-reosurce:"
             + nmContainerResource);
         container.eventHandler.handle(new RMNodeCleanContainerEvent(
-            container.nodeId, container.containerId));
+            container.nodeId, container.getContainerId()));
 
       }
-    }
-  }
-  
-  private static final class ChangeResourceTransition extends BaseTransition {
-
-    @Override
-    public void transition(RMContainerImpl container, RMContainerEvent event) {
-      RMContainerChangeResourceEvent changeEvent = (RMContainerChangeResourceEvent)event;
-
-      Resource targetResource = changeEvent.getTargetResource();
-      Resource lastConfirmedResource = container.lastConfirmedResource;
-
-      if (!changeEvent.isIncrease()) {
-        // Only unregister from the containerAllocationExpirer when target
-        // resource is less than or equal to the last confirmed resource.
-        if (Resources.fitsIn(targetResource, lastConfirmedResource)) {
-          container.lastConfirmedResource = targetResource;
-          container.containerAllocationExpirer.unregister(
-              new AllocationExpirationInfo(event.getContainerId()));
-        }
-      }
-
-      container.container.setResource(targetResource);
-
-      // We reach here means we either allocated increase reservation OR
-      // decreased container, reservation will be cancelled anyway. 
-      container.hasIncreaseReservation = false;
     }
   }
 
@@ -719,19 +708,12 @@ public class RMContainerImpl implements RMContainer, Comparable<RMContainer> {
     }
 
     private static void updateAttemptMetrics(RMContainerImpl container) {
-      // If this is a preempted container, update preemption metrics
       Resource resource = container.getContainer().getResource();
       RMAppAttempt rmAttempt = container.rmContext.getRMApps()
           .get(container.getApplicationAttemptId().getApplicationId())
           .getCurrentAppAttempt();
 
       if (rmAttempt != null) {
-        if (ContainerExitStatus.PREEMPTED == container.finishedStatus
-            .getExitStatus()) {
-            rmAttempt.getRMAppAttemptMetrics().updatePreemptionInfo(resource,
-              container);
-          }
-        
         long usedMillis = container.finishTime - container.creationTime;
         long memorySeconds = resource.getMemorySize()
                               * usedMillis / DateUtils.MILLIS_PER_SECOND;
@@ -739,6 +721,15 @@ public class RMContainerImpl implements RMContainer, Comparable<RMContainer> {
                              * usedMillis / DateUtils.MILLIS_PER_SECOND;
         rmAttempt.getRMAppAttemptMetrics()
                   .updateAggregateAppResourceUsage(memorySeconds,vcoreSeconds);
+        // If this is a preempted container, update preemption metrics
+        if (ContainerExitStatus.PREEMPTED == container.finishedStatus
+                .getExitStatus()) {
+          rmAttempt.getRMAppAttemptMetrics().updatePreemptionInfo(resource,
+                  container);
+          rmAttempt.getRMAppAttemptMetrics()
+                  .updateAggregatePreemptedAppResourceUsage(memorySeconds,
+                          vcoreSeconds);
+        }
       }
     }
   }
@@ -754,7 +745,7 @@ public class RMContainerImpl implements RMContainer, Comparable<RMContainer> {
 
       // Inform node
       container.eventHandler.handle(new RMNodeCleanContainerEvent(
-          container.nodeId, container.containerId));
+          container.nodeId, container.getContainerId()));
 
       // Inform appAttempt
       super.transition(container, event);
@@ -768,7 +759,7 @@ public class RMContainerImpl implements RMContainer, Comparable<RMContainer> {
     try {
       containerReport = ContainerReport.newInstance(this.getContainerId(),
           this.getAllocatedResource(), this.getAllocatedNode(),
-          this.getAllocatedPriority(), this.getCreationTime(),
+          this.getAllocatedSchedulerKey().getPriority(), this.getCreationTime(),
           this.getFinishTime(), this.getDiagnosticsInfo(), this.getLogURL(),
           this.getContainerExitStatus(), this.getContainerState(),
           this.getNodeHttpAddress());
@@ -824,20 +815,10 @@ public class RMContainerImpl implements RMContainer, Comparable<RMContainer> {
 
   @Override
   public int compareTo(RMContainer o) {
-    if (containerId != null && o.getContainerId() != null) {
-      return containerId.compareTo(o.getContainerId());
+    if (getContainerId() != null && o.getContainerId() != null) {
+      return getContainerId().compareTo(o.getContainerId());
     }
     return -1;
-  }
-
-  @Override
-  public boolean hasIncreaseReservation() {
-    return hasIncreaseReservation;
-  }
-
-  @Override
-  public void cancelIncreaseReservation() {
-    hasIncreaseReservation = false;
   }
 
   public void setQueueName(String queueName) {
@@ -857,5 +838,39 @@ public class RMContainerImpl implements RMContainer, Comparable<RMContainer> {
   @Override
   public boolean isRemotelyAllocated() {
     return isExternallyAllocated;
+  }
+
+  @Override
+  public Resource getAllocatedOrReservedResource() {
+    try {
+      readLock.lock();
+      if (getState().equals(RMContainerState.RESERVED)) {
+        return getReservedResource();
+      } else {
+        return getAllocatedResource();
+      }
+    } finally {
+      readLock.unlock();
+    }
+  }
+
+  @Override
+  public void setContainerId(ContainerId containerId) {
+    // In some cases, for example, global scheduling. It is possible that
+    // container created without container-id assigned, so we will publish
+    // container creation event to timeline service when id assigned.
+    container.setId(containerId);
+
+    if (containerId != null) {
+      rmContext.getRMApplicationHistoryWriter().containerStarted(this);
+    }
+    // If saveNonAMContainerMetaInfo is true, store system metrics for all
+    // containers. If false, and if this container is marked as the AM, metrics
+    // will still be published for this container, but that calculation happens
+    // later.
+    if (saveNonAMContainerMetaInfo && null != container.getId()) {
+      rmContext.getSystemMetricsPublisher().containerCreated(
+          this, this.creationTime);
+    }
   }
 }

@@ -25,6 +25,7 @@ import java.util.List;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.conf.Configured;
+import org.apache.hadoop.fs.FileEncryptionInfo;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.RemoteIterator;
@@ -34,6 +35,7 @@ import org.apache.hadoop.hdfs.protocol.EncryptionZone;
 import org.apache.hadoop.tools.TableListing;
 import org.apache.hadoop.util.StringUtils;
 import org.apache.hadoop.util.Tool;
+import org.apache.hadoop.util.ToolRunner;
 
 /**
  * This class implements crypto command-line operations.
@@ -53,6 +55,7 @@ public class CryptoAdmin extends Configured implements Tool {
   public int run(String[] args) throws IOException {
     if (args.length == 0) {
       AdminHelper.printUsage(false, "crypto", COMMANDS);
+      ToolRunner.printGenericCommandUsage(System.err);
       return 1;
     }
     final AdminHelper.Command command = AdminHelper.determineCommand(args[0],
@@ -63,6 +66,7 @@ public class CryptoAdmin extends Configured implements Tool {
         System.err.println("Command names must start with dashes.");
       }
       AdminHelper.printUsage(false, "crypto", COMMANDS);
+      ToolRunner.printGenericCommandUsage(System.err);
       return 1;
     }
     final List<String> argsList = new LinkedList<String>();
@@ -77,9 +81,10 @@ public class CryptoAdmin extends Configured implements Tool {
     }
   }
 
-  public static void main(String[] argsArray) throws IOException {
+  public static void main(String[] argsArray) throws Exception {
     final CryptoAdmin cryptoAdmin = new CryptoAdmin(new Configuration());
-    System.exit(cryptoAdmin.run(argsArray));
+    int res = ToolRunner.run(cryptoAdmin, argsArray);
+    System.exit(res);
   }
 
   /**
@@ -134,12 +139,12 @@ public class CryptoAdmin extends Configured implements Tool {
         System.err.println("Can't understand argument: " + args.get(0));
         return 1;
       }
-
-      HdfsAdmin admin = new HdfsAdmin(FileSystem.getDefaultUri(conf), conf);
+      Path p = new Path(path);
+      HdfsAdmin admin = new HdfsAdmin(p.toUri(), conf);
       EnumSet<CreateEncryptionZoneFlag> flags =
           EnumSet.of(CreateEncryptionZoneFlag.PROVISION_TRASH);
       try {
-        admin.createEncryptionZone(new Path(path), keyName, flags);
+        admin.createEncryptionZone(p, keyName, flags);
         System.out.println("Added encryption zone " + path);
       } catch (IOException e) {
         System.err.println(prettifyException(e));
@@ -193,6 +198,53 @@ public class CryptoAdmin extends Configured implements Tool {
     }
   }
 
+  private static class GetFileEncryptionInfoCommand
+      implements AdminHelper.Command {
+    @Override
+    public String getName() {
+      return "-getFileEncryptionInfo";
+    }
+
+    @Override
+    public String getShortUsage() {
+      return "[" + getName() + " -path <path>]\n";
+    }
+
+    @Override
+    public String getLongUsage() {
+      final TableListing listing = AdminHelper.getOptionDescriptionListing();
+      listing.addRow("<path>", "The path to the file to show encryption info.");
+      return getShortUsage() + "\n" + "Get encryption info of a file.\n\n" +
+          listing.toString();
+    }
+
+    @Override
+    public int run(Configuration conf, List<String> args) throws IOException {
+      final String path = StringUtils.popOptionWithArgument("-path", args);
+
+      if (!args.isEmpty()) {
+        System.err.println("Can't understand argument: " + args.get(0));
+        return 1;
+      }
+      Path p = new Path(path);
+      final HdfsAdmin admin =
+          new HdfsAdmin(p.toUri(), conf);
+      try {
+        final FileEncryptionInfo fei =
+            admin.getFileEncryptionInfo(p);
+        if (fei == null) {
+          System.err.println("No FileEncryptionInfo found for path " + path);
+          return 2;
+        }
+        System.out.println(fei.toStringStable());
+      } catch (IOException e) {
+        System.err.println(prettifyException(e));
+        return 3;
+      }
+      return 0;
+    }
+  }
+
   private static class ProvisionTrashCommand implements AdminHelper.Command {
     @Override
     public String getName() {
@@ -221,10 +273,10 @@ public class CryptoAdmin extends Configured implements Tool {
         System.err.println("Can't understand argument: " + args.get(0));
         return 1;
       }
-
-      HdfsAdmin admin = new HdfsAdmin(FileSystem.getDefaultUri(conf), conf);
+      Path p = new Path(path);
+      HdfsAdmin admin = new HdfsAdmin(p.toUri(), conf);
       try {
-        admin.provisionEncryptionZoneTrash(new Path(path));
+        admin.provisionEncryptionZoneTrash(p);
         System.out.println("Created a trash directory for " + path);
       } catch (IOException ioe) {
         System.err.println(prettifyException(ioe));
@@ -237,6 +289,7 @@ public class CryptoAdmin extends Configured implements Tool {
   private static final AdminHelper.Command[] COMMANDS = {
       new CreateZoneCommand(),
       new ListZonesCommand(),
-      new ProvisionTrashCommand()
+      new ProvisionTrashCommand(),
+      new GetFileEncryptionInfoCommand()
   };
 }

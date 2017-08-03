@@ -56,6 +56,7 @@ import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
@@ -136,7 +137,7 @@ import com.google.common.collect.Sets;
  */
 @InterfaceAudience.LimitedPrivate({"HBase", "HDFS", "Hive", "MapReduce", "Pig"})
 @InterfaceStability.Unstable
-public class MiniDFSCluster {
+public class MiniDFSCluster implements AutoCloseable {
 
   private static final String NAMESERVICE_ID_PREFIX = "nameserviceId";
   private static final Log LOG = LogFactory.getLog(MiniDFSCluster.class);
@@ -547,6 +548,8 @@ public class MiniDFSCluster {
   protected final int storagesPerDatanode;
   private Set<FileSystem> fileSystems = Sets.newHashSet();
 
+  private List<long[]> storageCap = Lists.newLinkedList();
+
   /**
    * A unique instance identifier for the cluster. This
    * is used to disambiguate HA filesystems in the case where
@@ -804,6 +807,14 @@ public class MiniDFSCluster {
     
       int replication = conf.getInt(DFS_REPLICATION_KEY, 3);
       conf.setInt(DFS_REPLICATION_KEY, Math.min(replication, numDataNodes));
+      int maintenanceMinReplication = conf.getInt(
+          DFSConfigKeys.DFS_NAMENODE_MAINTENANCE_REPLICATION_MIN_KEY,
+          DFSConfigKeys.DFS_NAMENODE_MAINTENANCE_REPLICATION_MIN_DEFAULT);
+      if (maintenanceMinReplication ==
+          DFSConfigKeys.DFS_NAMENODE_MAINTENANCE_REPLICATION_MIN_DEFAULT) {
+        conf.setInt(DFSConfigKeys.DFS_NAMENODE_MAINTENANCE_REPLICATION_MIN_KEY,
+            Math.min(maintenanceMinReplication, numDataNodes));
+      }
       int safemodeExtension = conf.getInt(
           DFS_NAMENODE_SAFEMODE_EXTENSION_TESTING_KEY, 0);
       conf.setInt(DFS_NAMENODE_SAFEMODE_EXTENSION_KEY, safemodeExtension);
@@ -1648,31 +1659,64 @@ public class MiniDFSCluster {
     }
     this.numDataNodes += numDataNodes;
     waitActive();
-    
-    if (storageCapacities != null) {
-      for (int i = curDatanodesNum; i < curDatanodesNum+numDataNodes; ++i) {
-        final int index = i - curDatanodesNum;
-        try (FsDatasetSpi.FsVolumeReferences volumes =
-            dns[index].getFSDataset().getFsVolumeReferences()) {
-          assert storageCapacities[index].length == storagesPerDatanode;
-          assert volumes.size() == storagesPerDatanode;
 
-          int j = 0;
-          for (FsVolumeSpi fvs : volumes) {
-            FsVolumeImpl volume = (FsVolumeImpl) fvs;
-            LOG.info("setCapacityForTesting " + storageCapacities[index][j]
-                + " for [" + volume.getStorageType() + "]" + volume
-                .getStorageID());
-            volume.setCapacityForTesting(storageCapacities[index][j]);
-            j++;
-          }
-        }
+    setDataNodeStorageCapacities(
+        curDatanodesNum,
+        numDataNodes,
+        dns,
+        storageCapacities);
+
+    /* memorize storage capacities */
+    if (storageCapacities != null) {
+      storageCap.addAll(Arrays.asList(storageCapacities));
+    }
+  }
+
+  private synchronized void setDataNodeStorageCapacities(
+      final int curDatanodesNum,
+      final int numDNs,
+      final DataNode[] dns,
+      long[][] storageCapacities) throws IOException {
+    if (storageCapacities != null) {
+      for (int i = curDatanodesNum; i < curDatanodesNum + numDNs; ++i) {
+        final int index = i - curDatanodesNum;
+        setDataNodeStorageCapacities(index, dns[index], storageCapacities);
       }
     }
   }
-  
-  
-  
+
+  private synchronized void setDataNodeStorageCapacities(
+      final int curDnIdx,
+      final DataNode curDn,
+      long[][] storageCapacities) throws IOException {
+
+    if (storageCapacities == null || storageCapacities.length == 0) {
+      return;
+    }
+
+    try {
+      waitDataNodeFullyStarted(curDn);
+    } catch (TimeoutException | InterruptedException e) {
+      throw new IOException(e);
+    }
+
+    try (FsDatasetSpi.FsVolumeReferences volumes = curDn.getFSDataset()
+        .getFsVolumeReferences()) {
+      assert storageCapacities[curDnIdx].length == storagesPerDatanode;
+      assert volumes.size() == storagesPerDatanode;
+
+      int j = 0;
+      for (FsVolumeSpi fvs : volumes) {
+        FsVolumeImpl volume = (FsVolumeImpl) fvs;
+        LOG.info("setCapacityForTesting " + storageCapacities[curDnIdx][j]
+            + " for [" + volume.getStorageType() + "]" + volume.getStorageID());
+        volume.setCapacityForTesting(storageCapacities[curDnIdx][j]);
+        j++;
+      }
+    }
+    DataNodeTestUtils.triggerHeartbeat(curDn);
+  }
+
   /**
    * Modify the config and start up the DataNodes.  The info port for
    * DataNodes is guaranteed to use a free port.
@@ -1944,11 +1988,18 @@ public class MiniDFSCluster {
    */
   public void shutdownDataNodes() {
     for (int i = dataNodes.size()-1; i >= 0; i--) {
-      LOG.info("Shutting down DataNode " + i);
-      DataNode dn = dataNodes.remove(i).datanode;
-      dn.shutdown();
-      numDataNodes--;
+      shutdownDataNode(i);
     }
+  }
+
+  /**
+   * Shutdown the datanode at a given index.
+   */
+  public void shutdownDataNode(int dnIndex) {
+    LOG.info("Shutting down DataNode " + dnIndex);
+    DataNode dn = dataNodes.remove(dnIndex).datanode;
+    dn.shutdown();
+    numDataNodes--;
   }
 
   /**
@@ -2236,6 +2287,16 @@ public class MiniDFSCluster {
     return restartDataNode(dnprop, false);
   }
 
+  private void waitDataNodeFullyStarted(final DataNode dn)
+      throws TimeoutException, InterruptedException {
+    GenericTestUtils.waitFor(new Supplier<Boolean>() {
+      @Override
+      public Boolean get() {
+        return dn.isDatanodeFullyStarted();
+      }
+    }, 100, 60000);
+  }
+
   /**
    * Restart a datanode, on the same port if requested
    * @param dnprop the datanode to restart
@@ -2256,10 +2317,21 @@ public class MiniDFSCluster {
       conf.set(DFS_DATANODE_IPC_ADDRESS_KEY,
           addr.getAddress().getHostAddress() + ":" + dnprop.ipcPort); 
     }
-    DataNode newDn = DataNode.createDataNode(args, conf, secureResources);
-    dataNodes.add(new DataNodeProperties(
-        newDn, newconf, args, secureResources, newDn.getIpcPort()));
+    final DataNode newDn = DataNode.createDataNode(args, conf, secureResources);
+
+    final DataNodeProperties dnp = new DataNodeProperties(
+        newDn,
+        newconf,
+        args,
+        secureResources,
+        newDn.getIpcPort());
+    dataNodes.add(dnp);
     numDataNodes++;
+
+    setDataNodeStorageCapacities(
+        dataNodes.lastIndexOf(dnp),
+        newDn,
+        storageCap.toArray(new long[][]{}));
     return true;
   }
 
@@ -3056,5 +3128,10 @@ public class MiniDFSCluster {
     } finally {
       writer.close();
     }
+  }
+
+  @Override
+  public void close() {
+    shutdown();
   }
 }
